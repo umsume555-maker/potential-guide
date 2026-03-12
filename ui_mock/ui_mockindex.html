@@ -1,0 +1,751 @@
+<!DOCTYPE html>
+<!-- saved from url=(0213)file:///C:/Users/012835-uno/Downloads/%E6%94%AF%E6%89%95%E4%BE%9D%E9%A0%BC%E6%9B%B8%E3%83%81%E3%82%A7%E3%83%83%E3%82%AF%E3%83%84%E3%83%BC%E3%83%AB_ui%E3%83%A2%E3%83%83%E3%82%AF%EF%BC%88html_css%EF%BC%89%20(5).html -->
+<html lang="ja"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>支払依頼書チェックツール（UIモック）</title>
+  <style>
+    :root{
+      --bg:#0b1020;
+      --panel:#111a33;
+      --panel2:#0f1730;
+      --text:#e8ecff;
+      --muted:#a9b2d6;
+      --line:rgba(255,255,255,.10);
+      --ok:#2ee59d;
+      --ng:#ff5c70;
+      --dash:#f7c948;
+      --btn:#2b3fff;
+      --btn2:#1b2a6a;
+      --shadow:0 10px 30px rgba(0,0,0,.35);
+      --radius:14px;
+    }
+
+    *{box-sizing:border-box}
+    body{
+      margin:0;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans JP", "Hiragino Kaku Gothic ProN", "Yu Gothic", "Meiryo", sans-serif;
+      color:var(--text);
+      background: radial-gradient(1200px 700px at 20% 10%, #1a2a6a 0%, rgba(26,42,106,0) 60%),
+                  radial-gradient(900px 600px at 85% 0%, #3a1c71 0%, rgba(58,28,113,0) 55%),
+                  linear-gradient(180deg, var(--bg), #070b16 70%);
+      min-height:100vh;
+    }
+
+    .app{
+      max-width: 1200px;
+      margin: 28px auto;
+      padding: 0 16px 40px;
+    }
+
+    header{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:16px;
+      margin-bottom:16px;
+    }
+
+    .title{
+      display:flex;
+      align-items:flex-start;
+      gap:14px;
+    }
+
+    .logo{
+      width:44px;
+      height:44px;
+      border-radius:14px;
+      background: linear-gradient(135deg, #2b3fff, #7c3aed);
+      box-shadow: var(--shadow);
+      display:grid;
+      place-items:center;
+      font-weight:800;
+      letter-spacing:.5px;
+    }
+
+    h1{
+      font-size: 18px;
+      margin: 0;
+      line-height:1.2;
+    }
+
+    .subtitle{
+      margin-top:4px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .pill{
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      border:1px solid var(--line);
+      background: rgba(255,255,255,.04);
+      padding:10px 12px;
+      border-radius:999px;
+      color: var(--muted);
+      font-size:12px;
+      white-space:nowrap;
+    }
+
+    .dot{width:8px;height:8px;border-radius:99px;background:var(--ok)}
+
+    .grid{
+      display:grid;
+      grid-template-columns: 380px 1fr;
+      gap:14px;
+    }
+
+    @media (max-width: 980px){
+      .grid{grid-template-columns: 1fr}
+    }
+
+    .card{
+      background: linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.03));
+      border:1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      overflow:hidden;
+    }
+
+    .card .hd{
+      padding:14px 14px 10px;
+      border-bottom:1px solid var(--line);
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      gap:10px;
+      background: rgba(0,0,0,.08);
+    }
+
+    .card .hd h2{
+      font-size: 13px;
+      margin:0;
+      letter-spacing:.2px;
+      color: var(--text);
+    }
+
+    .card .bd{
+      padding: 14px;
+    }
+
+    .row{display:flex; gap:10px; flex-wrap:wrap}
+
+    label{
+      display:block;
+      font-size:12px;
+      color: var(--muted);
+      margin-bottom:6px;
+    }
+
+    input[type="text"], input[type="month"], select{
+      width:100%;
+      padding:10px 10px;
+      border-radius:12px;
+      border:1px solid rgba(255,255,255,.12);
+      background: rgba(0,0,0,.22);
+      color: var(--text);
+      outline: none;
+    }
+
+    input[type="file"]{
+      width:100%;
+      padding:10px 10px;
+      border-radius:12px;
+      border:1px dashed rgba(255,255,255,.25);
+      background: rgba(0,0,0,.18);
+      color: var(--muted);
+    }
+
+    .btns{display:grid; gap:10px}
+
+    button{
+      appearance:none;
+      border:0;
+      border-radius: 12px;
+      padding: 11px 12px;
+      font-weight: 650;
+      color: var(--text);
+      cursor:pointer;
+      transition: transform .08s ease, filter .15s ease;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      gap:10px;
+    }
+
+    button:active{transform: translateY(1px)}
+
+    .primary{background: linear-gradient(135deg, #2b3fff, #7c3aed)}
+    .secondary{background: rgba(43,63,255,.18); border:1px solid rgba(43,63,255,.35)}
+    .ghost{background: rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.10); color:var(--muted)}
+    .danger{background: rgba(255,92,112,.18); border:1px solid rgba(255,92,112,.35)}
+
+    .hint{
+      color: var(--muted);
+      font-size: 12px;
+      line-height:1.45;
+      margin-top: 10px;
+    }
+
+    .status{
+      display:grid;
+      gap:10px;
+    }
+
+    .statusItem{
+      display:flex;
+      justify-content:space-between;
+      gap:12px;
+      padding:10px 12px;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: rgba(0,0,0,.18);
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .badge{
+      font-weight:700;
+      padding:3px 10px;
+      border-radius:999px;
+      border:1px solid rgba(255,255,255,.14);
+      background: rgba(255,255,255,.06);
+      color: var(--text);
+      white-space:nowrap;
+    }
+
+    .badge.ok{border-color: rgba(46,229,157,.35); background: rgba(46,229,157,.12);}
+    .badge.ng{border-color: rgba(255,92,112,.35); background: rgba(255,92,112,.12);}
+    .badge.dash{border-color: rgba(247,201,72,.35); background: rgba(247,201,72,.12);}
+
+    .tabs{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      padding: 12px 14px 0;
+    }
+
+    .tab{
+      padding:8px 10px;
+      border-radius: 999px;
+      border:1px solid var(--line);
+      background: rgba(255,255,255,.05);
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .tab.active{
+      color: var(--text);
+      border-color: rgba(43,63,255,.45);
+      background: rgba(43,63,255,.16);
+    }
+
+    .tableWrap{
+      overflow-x: auto;
+      overflow-y: auto;
+      max-height: 520px;
+      scrollbar-gutter: stable both-edges;
+      border-radius: 12px;
+      border:1px solid var(--line);
+      background: rgba(0,0,0,.12);
+      position: relative;
+    }
+
+    /* 横スクロールの存在を示す（右端に薄いフェード） */
+    .tableWrap::after{
+      content:"";
+      position: sticky;
+      right: 0;
+      top: 0;
+      display:block;
+      width: 28px;
+      height: 100%;
+      pointer-events:none;
+      background: linear-gradient(90deg, rgba(0,0,0,0), rgba(0,0,0,.35));
+      float:right;
+    }
+
+    /* 右端列を固定して“見失い防止” */
+    th.sticky-r, td.sticky-r{
+      position: sticky;
+      right: 0;
+      z-index: 3;
+      background: rgba(12,16,32,.92);
+      backdrop-filter: blur(6px);
+      border-left: 1px solid rgba(255,255,255,.10);
+    }
+
+    /* 種別の左（=ズレモレ判定） */
+    th.sticky-r2, td.sticky-r2{
+      position: sticky;
+      right: 84px; /* 種別(約80px)+余白 */
+      z-index: 4;
+      background: rgba(12,16,32,.92);
+      backdrop-filter: blur(6px);
+      border-left: 1px solid rgba(255,255,255,.10);
+    }
+
+    /* さらに左（=総合） */
+    th.sticky-r3, td.sticky-r3{
+      position: sticky;
+      right: 168px; /* 種別+ズレモレ判定 */
+      z-index: 5;
+      background: rgba(12,16,32,.92);
+      backdrop-filter: blur(6px);
+      border-left: 1px solid rgba(255,255,255,.10);
+    }
+
+    /* ヘッダー固定列はさらに前面 */
+    th.sticky-r, th.sticky-r2, th.sticky-r3{ z-index: 7; }
+
+    table{
+      width:100%;
+      min-width: 1720px;
+      border-collapse: separate;
+      border-spacing: 0;
+      overflow:hidden;
+      border:1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(0,0,0,.18);
+      font-size:12px;
+    }
+
+    th, td{
+      padding:10px 10px;
+      border-bottom:1px solid rgba(255,255,255,.08);
+      vertical-align: middle;
+    }
+
+    th{
+      text-align:left;
+      color: var(--muted);
+      background: rgba(255,255,255,.03);
+      font-weight: 650;
+      position: sticky;
+      top:0;
+      backdrop-filter: blur(6px);
+    }
+
+    tr:last-child td{border-bottom:0}
+
+    .right{ text-align:right }
+    .center{ text-align:center }
+    .muted{ color: var(--muted) }
+
+    .kpi{
+      display:grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    @media (max-width: 980px){
+      .kpi{grid-template-columns: repeat(2, 1fr)}
+    }
+
+    .kpiItem{
+      border:1px solid var(--line);
+      background: rgba(0,0,0,.16);
+      border-radius: 12px;
+      padding: 10px 12px;
+    }
+    .kpiItem .v{font-size:18px; font-weight:800; margin-top:4px}
+
+    .split{
+      display:grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+    }
+
+    .callout{
+      border:1px dashed rgba(255,255,255,.20);
+      background: rgba(0,0,0,.15);
+      border-radius: 12px;
+      padding: 10px 12px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height:1.5;
+    }
+
+    .tooltip{
+      position:relative;
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      cursor:help;
+    }
+
+    .tooltip::after{
+      content: attr(data-tip);
+      position:absolute;
+      left: 0;
+      bottom: calc(100% + 10px);
+      min-width: 220px;
+      max-width: 340px;
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,.16);
+      background: rgba(9,12,24,.96);
+      color: var(--text);
+      box-shadow: var(--shadow);
+      opacity: 0;
+      transform: translateY(4px);
+      pointer-events:none;
+      transition: opacity .12s ease, transform .12s ease;
+      z-index: 10;
+      white-space: normal;
+      line-height: 1.45;
+      font-size: 12px;
+    }
+
+    .tooltip::before{
+      content: "";
+      position:absolute;
+      left: 14px;
+      bottom: calc(100% + 2px);
+      width: 10px;
+      height: 10px;
+      background: rgba(9,12,24,.96);
+      border-left: 1px solid rgba(255,255,255,.16);
+      border-top: 1px solid rgba(255,255,255,.16);
+      transform: rotate(45deg);
+      opacity: 0;
+      transition: opacity .12s ease;
+      z-index: 9;
+    }
+
+    .tooltip:hover::after,
+    .tooltip:hover::before{
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    td.payee-alert{
+      border-left: 3px solid rgba(255,92,112,.75);
+      background: rgba(255,92,112,.08);
+    }
+
+    .ellipsis{
+      display:inline-block;
+      max-width: 100%;
+      overflow:hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      vertical-align: bottom;
+    }
+
+    .ellipsis.dept{ max-width: 200px; }
+    .ellipsis.vendor{ max-width: 240px; }
+    .ellipsis.invoice{ max-width: 105px; }
+
+    .copyable{
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 12px;
+      padding: 4px 8px;
+      border-radius: 10px;
+      border: 1px solid rgba(255,255,255,.14);
+      background: rgba(255,255,255,.06);
+      color: var(--text);
+      cursor: pointer;
+      user-select: all;
+      white-space: nowrap;
+    }
+
+    .copyable:hover{ border-color: rgba(43,63,255,.45); background: rgba(43,63,255,.14); }
+
+    .copyIcon{ opacity:.7; font-size: 11px; }
+
+    .toast{
+      position: fixed;
+      left: 50%;
+      bottom: 18px;
+      transform: translateX(-50%);
+      padding: 10px 12px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,.16);
+      background: rgba(9,12,24,.92);
+      color: var(--text);
+      box-shadow: var(--shadow);
+      font-size: 12px;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity .18s ease, transform .18s ease;
+      z-index: 50;
+    }
+    .toast.show{ opacity: 1; transform: translateX(-50%) translateY(-4px); }
+
+    .footer{
+      margin-top: 14px;
+      color: rgba(255,255,255,.45);
+      font-size: 11px;
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <div class="title">
+        <div class="logo">E2</div>
+        <div>
+          <h1>支払依頼書チェックツール（見た目モック）</h1>
+          <div class="subtitle">CSV（約1万行想定）→ 判定 → Excel出力 ／ NAS共有DB＋ロック運用</div>
+        </div>
+      </div>
+      <div class="pill"><span class="dot"></span> ロック：未取得（待機中）</div>
+    </header>
+
+    <div class="grid">
+      <!-- Left panel -->
+      <section class="card">
+        <div class="hd">
+          <h2>実行</h2>
+          <span class="badge ok">モック</span>
+        </div>
+        <div class="bd">
+          <div class="row" style="margin-bottom:10px">
+            <div style="flex:1">
+              <label>基準月（YYYY-MM）</label>
+              <input type="month" value="2025-10">
+            </div>
+            <div style="flex:1">
+              <label>入力CSV（対象月＋翌月の2か月分）</label>
+              <input type="file">
+            </div>
+          </div>
+
+          <div class="btns">
+            <button class="primary">▶ チェック実行</button>
+            <button class="secondary">☁ スプレッドシート更新（WORKBOARD/HOLD_MATCH）</button>
+            <button class="secondary">↻ 月次更新（確認なしで即更新）</button>
+            <button class="ghost">☀ 祝日更新（年次）</button>
+            <button class="danger">⚠ ロック強制解除（最終手段）</button>
+          </div>
+
+          <div class="hint">
+            ・同時実行は禁止（NASの <span class="muted">tool.lock</span> で制御）<br>
+            ・スプシ更新は「チェック実行後」に手動ボタンで実行（更新対象列のみUpsert／担当（確定）・✅・コメントは上書きしない）<br>
+            ・NGが残っていても月次更新は可能（照合保留があってもストップしない）。ただしテンプレ採用は総合OKのみ
+          </div>
+        </div>
+
+        <div class="hd">
+          <h2>状態</h2>
+          <span class="badge dash">OK / NG / －</span>
+        </div>
+        <div class="bd status">
+          <div class="statusItem">
+            <span>入力行数（CSV）</span>
+            <span class="badge">9,842 行</span>
+          </div>
+          <div class="statusItem">
+            <span>伝票数（枝番なし）</span>
+            <span class="badge">1,842 件</span>
+          </div>
+          <div class="statusItem">
+            <span>総合NG（確定分のみ）</span>
+            <span class="badge ng">128 件</span>
+          </div>
+          <div class="statusItem">
+            <span>照合保留（要確認・集計除外）</span>
+            <span class="badge dash">7 件</span>
+          </div>
+          <div class="statusItem">
+            <span>総合－（累積なし等）</span>
+            <span class="badge dash">42 件</span>
+          </div>
+          <div class="statusItem">
+            <span>祝日データ</span>
+            <span class="badge ok">OK（2025-2027）</span>
+          </div>
+          <div class="statusItem">
+            <span>累積（14か月）</span>
+            <span class="badge">1,040,000 行</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Right panel -->
+      <section class="card">
+        <div class="hd">
+          <h2>結果プレビュー</h2>
+          <span class="badge">OUTPUT_2025-10.xlsx</span>
+          <span class="badge" style="margin-left:auto; background: rgba(255,255,255,.06);">↔ 横スクロール</span>
+        </div>
+
+        <div class="tabs">
+          <div class="tab active">OUTPUT_SUMMARY</div>
+          <div class="tab">OUTPUT_DETAIL</div>
+          <div class="tab">DUPLICATE_INVOICES</div>
+          <div class="tab">マスター</div>
+        </div>
+
+        <div class="bd">
+          <div class="kpi"><div class="kpiItem">
+              <div class="muted">支払先相違</div>
+              <div class="v">5</div>
+            </div>
+            <div class="kpiItem">
+              <div class="muted">照合保留（集計除外）</div>
+              <div class="v">7</div>
+            </div>
+          </div>
+
+          <div class="split">
+            <div class="tableWrap">
+            <table>
+              <thead>
+                <tr>
+                  <th class="center" style="width:60px">総合</th>
+                  <th style="width:140px">部門（コード）</th>
+                  <th style="width:220px">部門名</th>
+                  <th style="width:110px">取引先（コード）</th>
+                  <th style="width:260px">取引先名</th>
+                  <th style="width:90px">担当（確定）</th>
+                  <th style="width:110px">担当（初期提案）</th>
+                  <th style="width:110px">伝票番号</th>
+                  <th style="width:90px">取引日付</th>
+                  <th style="width:90px">支払先</th>
+                  <th style="width:86px">支払先相違</th>
+                  <th style="width:150px">振込先口座番号</th>
+                  <th style="width:90px">状況区分</th>
+                  <th class="right" style="width:120px">支払金額</th>
+                  <th style="width:70px">予定日</th>
+                  <th style="width:70px">税</th>
+                  <th style="width:70px">科目</th>
+                  <th class="sticky-r2" style="width:84px">ズレモレ判定</th>
+                  <th class="sticky-r" style="width:80px">種別</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td class="center"><span class="badge ok">OK</span></td>
+                  <td><span class="copyable" data-copy="1101" title="クリックでコピー">1101 <span class="copyIcon">⧉</span></span></td>
+                  <td><span class="ellipsis dept tooltip" data-tip="部門名：○○ホームさいたま">○○ホームさいたま</span></td>
+                  <td><span class="copyable" data-copy="30001234" title="クリックでコピー">30001234 <span class="copyIcon">⧉</span></span></td>
+                  <td><span class="ellipsis vendor tooltip" data-tip="取引先名：株式会社サンプル商事">株式会社サンプル商事</span></td>
+                  <td><span class="badge ok">宇野</span></td>
+                  <td><span class="badge ok">宇野</span></td>
+                  <td><span class="ellipsis invoice tooltip" data-tip="伝票番号：PI2511001811">PI2511001811</span></td>
+                  <td>2025-10-15</td>
+                  <td><span class="copyable" data-copy="30001234" title="クリックでコピー">30001234 <span class="copyIcon">⧉</span></span></td>
+                  <td><span class="badge ok">OK</span></td>
+                  <td>1 0000003 / 1</td>
+                  <td>通常</td>
+                  <td class="right">¥ 52,000</td>
+                  <td><span class="tooltip" data-tip="支払予定日（申請）：2025-11-28
+支払予定日（期待）：2025-11-28（完全一致→OK）"><span class="badge ok">OK</span></span></td>
+                  <td><span class="tooltip" data-tip="税区分（申請）：課税10%
+税区分（正）：課税10%（一致→OK）"><span class="badge ok">OK</span></span></td>
+                  <td><span class="tooltip" data-tip="科目（申請）：消耗品費
+科目（正）：消耗品費（一致→OK）"><span class="badge ok">OK</span></span></td>
+                  <td class="sticky-r2"><span class="badge ok">OK</span></td>
+                  <td class="sticky-r muted"></td>
+                </tr>
+                <tr>
+                  <td class="center"><span class="badge ng">NG</span></td>
+                  <td><span class="copyable" data-copy="1101" title="クリックでコピー">1101 <span class="copyIcon">⧉</span></span></td>
+                  <td><span class="ellipsis dept tooltip" data-tip="部門名：○○ホームさいたま">○○ホームさいたま</span></td>
+                  <td><span class="copyable" data-copy="30004567" title="クリックでコピー">30004567 <span class="copyIcon">⧉</span></span></td>
+                  <td><span class="ellipsis vendor tooltip" data-tip="取引先名：株式会社サンプル設備">株式会社サンプル設備</span></td>
+                  <td class="muted">（空欄）</td>
+                  <td><span class="badge dash">木島</span></td>
+                  <td><span class="ellipsis invoice tooltip" data-tip="伝票番号：PI2511002190">PI2511002190</span></td>
+                  <td>2025-10-31</td>
+                  <td><span class="copyable tooltip" data-copy="30004567" data-tip="支払先名：株式会社サンプル設備（必要時のみ表示）" title="クリックでコピー">30004567 <span class="copyIcon">⧉</span></span></td>
+                  <td><span class="badge ok">OK</span></td>
+                  <td>1 0000003 / 1</td>
+                  <td>通常</td>
+                  <td class="right">¥ 210,000</td>
+                  <td><span class="tooltip" data-tip="支払予定日（申請）：2025-12-02
+支払予定日（期待）：2025-11-28（完全一致のみOK）"><span class="badge ng">NG</span></span></td>
+                  <td><span class="tooltip" data-tip="税区分（申請）：課税10%
+税区分（正）：課税10%（一致→OK）"><span class="badge ok">OK</span></span></td>
+                  <td><span class="tooltip" data-tip="科目（申請）：修繕費
+科目（正）：水道光熱費（不一致→NG）"><span class="badge ng">NG</span></span></td>
+                  <td class="sticky-r2"><span class="badge ng">NG</span></td>
+                  <td class="sticky-r">ズレ</td>
+                </tr>
+                <tr>
+                  <td class="center"><span class="badge dash">－</span></td>
+                  <td><span class="copyable" data-copy="1202" title="クリックでコピー">1202 <span class="copyIcon">⧉</span></span></td>
+                  <td><span class="ellipsis dept tooltip" data-tip="部門名：△△訪問看護">△△訪問看護</span></td>
+                  <td><span class="copyable" data-copy="30007890" title="クリックでコピー">30007890 <span class="copyIcon">⧉</span></span></td>
+                  <td><span class="ellipsis vendor tooltip" data-tip="取引先名：サンプル清掃サービス">サンプル清掃サービス</span></td>
+                  <td class="muted">（空欄）</td>
+                  <td class="muted">（空欄）</td>
+                  <td><span class="ellipsis invoice tooltip" data-tip="伝票番号：PI2511003055">PI2511003055</span></td>
+                  <td>2025-10-05</td>
+                  <td class="payee-alert"><span class="copyable tooltip" data-copy="30001234" data-tip="支払先名：株式会社サンプル商事（許容支払先の確認用）" title="クリックでコピー">30001234 <span class="copyIcon">⧉</span></span></td>
+                  <td><span class="badge ng">NG</span></td>
+                  <td>1 0000003 / 1</td>
+                  <td>至急</td>
+                  <td class="right">¥ 18,500</td>
+                  <td><span class="tooltip" data-tip="支払予定日（申請）：2025-11-27
+支払予定日（期待）：2025-11-27（休日・月跨ぎ設定反映）"><span class="badge ok">OK</span></span></td>
+                  <td><span class="tooltip" data-tip="税区分（申請）：（空欄）
+税区分（正）：（累積なし→－）"><span class="badge dash">－</span></span></td>
+                  <td><span class="tooltip" data-tip="科目（申請）：（空欄）
+科目（正）：（累積なし→－）"><span class="badge dash">－</span></span></td>
+                  <td class="sticky-r2"><span class="badge ok">OK</span></td>
+                  <td class="sticky-r muted"></td>
+                </tr>
+              </tbody>
+            </table>
+            </div>
+
+            <div class="callout">
+              <b>表示の考え方（モック）</b><br>
+              ・税区分/科目：INPUTの最小枝番の値をOUTPUTに採用し、累積（テンプレ採用=1の直近）と比較してOK/NG/－を表示（セルにホバーで「申請値／正の値」を表示）<br>
+              ・部門名/取引先名：マスターから取得してOUTPUTに表示（判定なし）<br>
+              ・担当（確定）：手入力（ツールは更新しない）／ 担当（初期提案）：担当割当マスター（取引先＞部門）で初回のみ自動セット（未割当は空欄）<br>
+              ・状況区分：INPUTからそのままOUTPUTへ引き継ぎ（表示のみ）<br>
+              ・振込先口座番号：取引先マスターから取得してOUTPUTに表示（判定なし）<br>
+              ・支払先名：常時表示せず、支払先コードにホバーしたときだけツールチップで表示（必要時のみ）<br>
+              ・支払予定日：取引先パターン（P01〜P04＋月跨ぎ制御）から期待日を計算し、完全一致のみOK（セルにホバーで「申請日／期待日」を表示）<br>
+              ・総合：NGがあればNG、NGなしで－があれば－、全部OKでOK（照合保留は別枠で集計除外）<br>
+              ・支払先相違：取引先コード×支払先コードが一致しない場合にNG（許容支払先マスターで例外OK）<br>
+              ・ズレモレ判定：種別が空欄ならOK、種別（モレ/ズレ/二重）が入っていればNG（確定仕様）<br>
+              ・種別：モレ &gt; ズレ &gt; 二重 の優先順位（確定仕様）。該当なしは空欄（毎月判定と同じ見え方）
+            </div>
+
+            <div class="footer">※ これは「見た目だけ」モックです。実装時はCSV約1万行（将来増えてもOK）を想定し、Python+SQLiteで安定処理します。</div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+  <div id="toast" class="toast">コピーしました</div>
+  <script>
+    (function(){
+      const toast = document.getElementById('toast');
+      let t;
+      function showToast(msg){
+        toast.textContent = msg;
+        toast.classList.add('show');
+        clearTimeout(t);
+        t = setTimeout(()=>toast.classList.remove('show'), 900);
+      }
+      async function copy(text){
+        try{
+          await navigator.clipboard.writeText(text);
+          showToast(`コピーしました：${text}`);
+        }catch(e){
+          // フォールバック（選択しやすいようにするだけ）
+          showToast('コピー権限がないため選択してコピーしてください');
+        }
+      }
+      document.addEventListener('click', (ev)=>{
+        const el = ev.target.closest('.copyable');
+        if(!el) return;
+        const text = el.getAttribute('data-copy') || el.textContent.trim();
+        copy(text);
+      });
+    })();
+  </script>
+
+
+</body></html>

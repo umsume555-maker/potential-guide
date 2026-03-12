@@ -1,0 +1,112 @@
+# 請求書OCR設定ファイル
+# YAML形式
+
+# OCR設定
+ocr:
+  # pyocr閾値 (この値未満の場合はAI OCRにフォールバック)
+  confidence_threshold: 0.72
+  
+  # Tesseract言語設定
+  tesseract_lang: "jpn+eng"
+
+# スコアリング重み (合計1.0)
+scoring:
+  amount: 0.35        # 金額取得成功
+  invoice: 0.25       # インボイス番号取得
+  reduced_tax: 0.10   # 軽減税率判定可能
+  plausibility: 0.15  # 金額妥当性
+  text_quality: 0.15  # OCR文字品質
+
+# 対象ファイル拡張子
+file_extensions:
+  include:
+    - pdf
+    - png
+    - jpg
+    - jpeg
+    - tif
+    - tiff
+  exclude:
+    - xls
+    - xlsx
+    - xlsm
+
+# 金額抽出設定
+amount_extraction:
+  # 除外ラベル（近傍にこれらがあれば金額候補から除外）
+  exclude_labels:
+    - 繰越
+    - 前月
+    - 入金
+    - 相殺
+    - 充当
+    - 残高
+    - 前月繰越
+    - 繰越金額
+    - 前月分
+  
+  # 優先ラベル（近傍にこれらがあれば高スコア）
+  priority_labels:
+    - 請求金額
+    - 合計
+    - 税込
+    - 今回請求
+    - 当月請求
+    - ご請求金額
+  
+  # 近傍ウィンドウ（文字数）
+  window_chars: 30
+
+# インボイス番号パターン
+invoice_pattern: "T\\d{13}"
+
+# 請求書判定キーワード
+invoice_keywords:
+  - 請求書
+  - 御請求
+  - 請求金額
+  - ご請求
+  - インボイス
+
+# 稟議書判定キーワード（部分一致）
+ringisyo_keywords:
+  - "標準【H26.10～】０２－０１"
+  - "標準【H26.10～】０２－０２"
+  - "標準【H26.10～】０２－０３"
+  - "標準【H26.10～】０２－０４"
+  - "標準【H26.10～】０２－０５"
+  - "標準【H26.10～】０２－０６"
+  - "標準【H26.10～】０３－０１"
+  - "標準【H26.10～】０３－０２"
+  - "標準【H26.10～】０３－０３"
+  - "標準【H26.10～】０３－０４"
+  - "標準【H26.10～】０４－０１"
+  - "標準【H26.10～】０４－０２"
+  - "標準【H26.10～】０４－０３"
+  - "標準【H26.10～】０４－０４"
+  - "標準【H26.10～】０４－０５"
+  - "標準【H26.10～】０４－０６"
+  - "標準【R6.6～】０４－０７"
+  - "標準【H26.10～】０５－０１"
+  - "[社長決裁]"
+
+# AI OCR設定
+ai_ocr:
+  # 使用するプロバイダー: gemini / openai / bedrock
+  provider: "gemini"
+  
+  # モデル名
+  model: "gemini-2.0-flash"
+  
+  # API呼び出し時のタイムアウト（秒）
+  timeout: 60
+
+# キャッシュ設定
+cache:
+  enabled: true
+  directory: "cache/ocr"
+
+# ログ設定
+logging:
+  level: "INFO"
+  directory: "logs"

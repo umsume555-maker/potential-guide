@@ -1,0 +1,66 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# 請求書PDF等の実データ（機密情報）
+invoice_ocr/ZIP_FILE_OUT/
+invoice_ocr/output/
+masters/
+
+# 仮想環境
+venv/
+.venv/
+env/
+
+# データベース（個人データ含む）
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/app.db
+
+# 認証情報（絶対にコミットしない）
+data/credentials.json
+credentials.json
+*.json.bak
+
+# 出力ファイル（生成物）
+data/OUTPUT_*.xlsx
+data/reconcile_*.xlsx
+
+# 設定ファイル（環境ごとに異なる）
+config/invoice_reconcile_settings.json
+
+# ログ
+*.log
+server.log
+sync_debug.log
+
+# 不使用データフォルダ
+不使用データ/
+
+# デバッグスクリプト
+debug_*.py
+test_*.py
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Gemini/Antigravityキャッシュ
+.gemini/
+
+# 一時ファイル
+tmp/
+temp/
+*.tmp
