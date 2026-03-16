@@ -1,7 +1,8 @@
 import sqlite3
 import os
+from pathlib import Path
 
-DB_PATH = r"c:\Users\012835-uno\Desktop\unzip_and_cleanup\支払依頼チェックツール\k_shiharai.db"
+DB_PATH = str(Path(__file__).parent.parent / "data" / "payment_check.db")
 
 def migrate():
     print(f"Connecting to {DB_PATH}")

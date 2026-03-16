@@ -524,7 +524,10 @@ class SpreadsheetService:
                         break
                 
                 requests = []
-                
+
+                if current_sheet_meta is None:
+                    current_sheet_meta = {}
+
                 # 削除リクエスト（保護）
                 if 'protectedRanges' in current_sheet_meta:
                     for pr in current_sheet_meta['protectedRanges']:
@@ -533,18 +536,8 @@ class SpreadsheetService:
                                 "protectedRangeId": pr['protectedRangeId']
                             }
                         })
-                
+
                 # 削除リクエスト（条件付き書式）
-                # Conditional formats are indexed. Deleting index 0 repeatedly? 
-                # Or delete by index from known list.
-                # Actually, clearing all conditional formats via batchUpdate -> deleteConditionalFormatRule involves indices.
-                # Easier strategy: Don't check existing, just rely on replacements? 
-                # No, formats stack. 
-                # Correct way: Iterate backwards to delete?
-                # Alternative: Use updateSheetProperties to clear grid? No.
-                # If we have logic to clear formatting, that's good. 
-                # For now, let's assume we append rules. But duplication is bad.
-                # Let's try to clear them if possible. 
                 if 'conditionalFormats' in current_sheet_meta:
                     # 数が多いと面倒だが、後ろから消す
                     count = len(current_sheet_meta['conditionalFormats'])

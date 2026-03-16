@@ -81,6 +81,46 @@ def get_last_day_of_month(year: int, month: int) -> date:
     return next_month - timedelta(days=1)
 
 
+def get_closing_date(transaction_date: date, closing_day: int) -> date:
+    """
+    取引日が属する締め期間の締日を返す。
+
+    Args:
+        transaction_date: 取引日付
+        closing_day: 締日（0=末日, 1-31）
+
+    Returns:
+        その取引が属する締め期間の締日
+
+    Examples:
+        closing_day=20 の場合:
+          - 取引日 10/10 → 10/20 締め（10月分）
+          - 取引日 10/25 → 11/20 締め（11月分）
+        closing_day=0（末日）の場合:
+          - 取引日 10/10 → 10/31 締め
+          - 取引日 10/31 → 10/31 締め
+    """
+    y, m, d = transaction_date.year, transaction_date.month, transaction_date.day
+
+    if closing_day == 0:
+        # 末日締め: 取引月の末日が締日
+        return get_last_day_of_month(y, m)
+
+    # 取引日 <= 締日 → 同月の締日
+    # 取引日 >  締日 → 翌月の締日
+    if d <= closing_day:
+        # 同月の closing_day 日（月末を超えないようにクランプ）
+        last = get_last_day_of_month(y, m)
+        actual_day = min(closing_day, last.day)
+        return date(y, m, actual_day)
+    else:
+        # 翌月の closing_day 日
+        next_month = date(y, m, 1) + relativedelta(months=1)
+        last = get_last_day_of_month(next_month.year, next_month.month)
+        actual_day = min(closing_day, last.day)
+        return date(next_month.year, next_month.month, actual_day)
+
+
 def calculate_expected_payment_date(
     transaction_date: date,
     closing_day: int,
@@ -92,53 +132,48 @@ def calculate_expected_payment_date(
 ) -> date:
     """
     期待支払日を計算
-    
+
     Args:
         transaction_date: 取引日付
         closing_day: 締日（0=末日, 1-31）
-        payment_month_offset: 期日指定月数（1=翌月, 2=翌々月）
-        payment_day: 期日指定日（0=末日, 1-31）
-        holiday_handling: 休日考慮区分（"1"=休日前, "2"=休日後）
-        holidays: 祝日セット
-        no_month_crossing: 月跨ぎ不可
-    
+        payment_month_offset: 締日基準の支払月数（1=締日翌月, 2=締日翌々月）
+        payment_day: 支払日（0=末日, 1-31）
+        holiday_handling: 休日考慮区分（"1"=休日前倒し, "2"=休日後倒し）
+        holidays: 祝日セット（YYYY-MM-DD 文字列）
+        no_month_crossing: True=後倒しで翌月になる場合は前倒しに切り替え
+
     Returns:
-        期待支払日
+        期待支払日（休日調整済み）
+
+    Notes:
+        修正前は closing_day を無視して取引日をそのまま基準にしていた。
+        正しくは: 取引日 → 属する締め期間の締日 → +offset ヶ月 → payment_day
     """
-    # 基準月を計算（取引日から支払月を算出）
-    base_date = transaction_date
-    
-    # 支払月を計算
-    payment_month_date = base_date + relativedelta(months=payment_month_offset)
-    
-    # 支払日を設定
+    # 1. 取引日が属する締め期間の締日を求める
+    closing_date = get_closing_date(transaction_date, closing_day)
+
+    # 2. 締日から payment_month_offset ヶ月後の月を支払月とする
+    payment_month_date = closing_date + relativedelta(months=payment_month_offset)
+
+    # 3. 支払日を決定
     if payment_day == 0:
-        # 末日
+        # 末日払い
         expected = get_last_day_of_month(
-            payment_month_date.year, 
+            payment_month_date.year,
             payment_month_date.month
         )
     else:
-        try:
-            expected = date(
-                payment_month_date.year,
-                payment_month_date.month,
-                min(payment_day, get_last_day_of_month(
-                    payment_month_date.year, 
-                    payment_month_date.month
-                ).day)
-            )
-        except ValueError:
-            # 日付が無効な場合は末日
-            expected = get_last_day_of_month(
-                payment_month_date.year, 
-                payment_month_date.month
-            )
-    
-    # 休日調整
+        last = get_last_day_of_month(payment_month_date.year, payment_month_date.month)
+        expected = date(
+            payment_month_date.year,
+            payment_month_date.month,
+            min(payment_day, last.day)
+        )
+
+    # 4. 休日調整
     before = (holiday_handling == "1")
     expected = adjust_for_holiday(expected, holidays, before, no_month_crossing)
-    
+
     return expected
 
 

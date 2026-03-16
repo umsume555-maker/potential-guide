@@ -8,7 +8,7 @@ try:
 except:
     pass
 
-BASE_DIR = Path(r"c:\Users\012835-uno\Desktop\unzip_and_cleanup\支払依頼チェックツール\invoice_ocr\ZIP_FILE_OUT")
+BASE_DIR = Path(__file__).parent.parent / "invoice_ocr" / "ZIP_FILE_OUT"
 
 def inspect_structure():
     print(f"Inspecting: {BASE_DIR}")

@@ -2,6 +2,7 @@
 支払依頼書チェックツール - FastAPIメインアプリケーション
 """
 import sys
+import logging
 from pathlib import Path
 
 # プロジェクトルートをパスに追加
@@ -15,6 +16,14 @@ from fastapi.responses import HTMLResponse
 
 from app.routers import check, master, rule, assignment, exclude, sync, settings, ocr, reconcile
 from infra.database import init_database
+
+# ロガー設定
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 # アプリケーション作成
 app = FastAPI(
@@ -43,12 +52,11 @@ app.include_router(reconcile.router)
 @app.on_event("startup")
 async def startup_event():
     """起動時の初期化"""
-    # データベース初期化
     init_database()
-    print("データベースを初期化しました")
-    print("#######################################################")
-    print("###        起動確認: バージョンチェック OK          ###")
-    print("#######################################################")
+    logger.info("データベースを初期化しました")
+    logger.info("=" * 55)
+    logger.info("  起動確認: バージョンチェック OK")
+    logger.info("=" * 55)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -61,6 +69,26 @@ async def index(request: Request):
 async def health_check():
     """ヘルスチェック"""
     return {"status": "ok"}
+
+
+@app.get("/debug/creds")
+async def debug_creds():
+    """認証ファイル診断（一時エンドポイント）"""
+    import sqlite3
+    from infra.database import DATA_DIR, resolve_credentials_path, CREDENTIALS_PATH
+    db_path = DATA_DIR / "payment_check.db"
+    conn = sqlite3.connect(str(db_path))
+    stored = conn.execute("SELECT value FROM app_settings WHERE key='google_credentials_path'").fetchone()
+    conn.close()
+    stored_val = stored[0] if stored else None
+    resolved = resolve_credentials_path(stored_val)
+    return {
+        "db_stored": stored_val,
+        "resolved_path": str(resolved) if resolved else None,
+        "canonical_exists": CREDENTIALS_PATH.exists(),
+        "canonical_path": str(CREDENTIALS_PATH),
+        "sync_py_has_resolve": "resolve_credentials_path" in open("app/routers/sync.py", encoding="utf-8").read(),
+    }
 
 
 if __name__ == "__main__":

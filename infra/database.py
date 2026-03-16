@@ -4,9 +4,12 @@ WALモードでSQLite接続を管理
 """
 import sqlite3
 import os
+import logging
 from pathlib import Path
 from contextlib import contextmanager
 from typing import Generator
+
+logger = logging.getLogger(__name__)
 
 # データディレクトリ
 # プロジェクト直下の data/payment_check.db を使用
@@ -18,9 +21,32 @@ DB_PATH = DATA_DIR / "payment_check.db"
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 
+CREDENTIALS_PATH = DATA_DIR / "credentials.json"
+
+
 def ensure_data_dir() -> None:
     """データディレクトリを作成"""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def resolve_credentials_path(stored_value: str = None) -> Path:
+    """
+    認証ファイルのパスを解決する（ポータブル対応）。
+
+    優先順位:
+      1. data/credentials.json が存在すればそれを使用（正規の置き場所）
+      2. stored_value が絶対パスで存在すればそれを使用（後方互換）
+      3. どちらも存在しなければ None を返す
+    """
+    if CREDENTIALS_PATH.exists():
+        return CREDENTIALS_PATH
+    if stored_value:
+        p = Path(stored_value)
+        if not p.is_absolute():
+            p = base_dir / p
+        if p.exists():
+            return p
+    return None
 
 
 def get_connection() -> sqlite3.Connection:
@@ -67,7 +93,7 @@ def init_database() -> None:
             columns = [info["name"] for info in cursor.fetchall()]
             if "gemini_flag" not in columns:
                 conn.execute("ALTER TABLE vendors ADD COLUMN gemini_flag TEXT")
-                print("Migration: Added gemini_flag column to vendors")
+                logger.info("Migration: Added gemini_flag column to vendors")
 
             # Phase 9: AI設定テーブル作成（取引先マスタとは独立して管理）
             conn.execute("""
@@ -77,7 +103,7 @@ def init_database() -> None:
                     updated_at TEXT DEFAULT (datetime('now', 'localtime'))
                 )
             """)
-            print("Migration: Guaranteed masters_ai_setting table")
+            logger.debug("Migration: Guaranteed masters_ai_setting table")
 
             # Phase 10: Recurring Missing Refinements
             # 1. Vendor Reconciliation Target Table
@@ -88,21 +114,21 @@ def init_database() -> None:
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            print("Migration: Guaranteed vendor_reconciliation_target table")
+            logger.debug("Migration: Guaranteed vendor_reconciliation_target table")
 
             # 2. Output Summary is_monthly column
             cursor = conn.execute("PRAGMA table_info(output_summary)")
             columns = [info["name"] for info in cursor.fetchall()]
             if "is_monthly" not in columns:
                 conn.execute("ALTER TABLE output_summary ADD COLUMN is_monthly TEXT")
-                print("Migration: Added is_monthly column to output_summary")
+                logger.info("Migration: Added is_monthly column to output_summary")
 
             conn.commit()
         except Exception as e:
-            print(f"Migration Warning: {e}")
+            logger.warning("Migration Warning: %s", e)
         # -----------------
 
-        print(f"データベースを初期化しました: {DB_PATH}")
+        logger.info("データベースを初期化しました: %s", DB_PATH)
 
 
 def reset_database() -> None:
@@ -115,7 +141,7 @@ def reset_database() -> None:
             p = Path(str(DB_PATH) + suffix)
             if p.exists():
                 p.unlink()
-        print(f"データベースを削除しました: {DB_PATH}")
+        logger.info("データベースを削除しました: %s", DB_PATH)
     
     init_database()
 

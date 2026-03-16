@@ -124,17 +124,17 @@ async def upload_credentials(file: UploadFile = File(...)):
     if not file.filename.endswith(".json"):
         raise HTTPException(status_code=400, detail="JSONファイルを選択してください")
     
-    # 保存先: DATA_DIR/credentials.json
+    # 保存先: DATA_DIR/credentials.json（固定）
     save_path = DATA_DIR / "credentials.json"
-    
+
     try:
         with save_path.open("wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-            
-        # DBにパスを保存
+
+        # DBには相対パスで保存（ポータブル対応）
         with get_db() as conn:
-            repo.set_setting(conn, "google_credentials_path", str(save_path))
-            
+            repo.set_setting(conn, "google_credentials_path", "data/credentials.json")
+
         return {"status": "ok", "message": "認証ファイルを保存しました", "path": str(save_path)}
         
     except Exception as e:

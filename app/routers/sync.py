@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from infra.database import DB_PATH, get_db, DATA_DIR
+from infra.database import DB_PATH, get_db, resolve_credentials_path
 from infra.settings_repository import SettingsRepository
 from infra.spreadsheet_service import SpreadsheetService
 
@@ -36,23 +36,18 @@ async def sync_google_sheet(data: SpreadsheetSyncRequest):
     log_step(f"Start sync_google_sheet (DriveUpload={data.upload_drive})")
     
     try:
-        creds_path = None
-        
         with get_db() as conn:
-            # DBからパスを取得
-            creds_path = repo.get_setting(conn, "google_credentials_path")
-            
-        log_step(f"Credentials path from DB: {creds_path}")
-        
-        # DBになくても、アプリのデータフォルダにあればそれを使う
-        if not creds_path:
-            default_path = DATA_DIR / "credentials.json"
-            if default_path.exists():
-                creds_path = str(default_path)
-                log_step(f"Using default credentials: {creds_path}")
+            stored = repo.get_setting(conn, "google_credentials_path")
 
-        if not creds_path:
-             raise HTTPException(status_code=400, detail="認証ファイル(credentials.json)が設定されていません。設定タブからアップロードしてください。")
+        log_step(f"Credentials path from DB: {stored}")
+
+        creds = resolve_credentials_path(stored)
+        log_step(f"Resolved credentials path: {creds}")
+
+        if not creds:
+            raise HTTPException(status_code=400, detail="認証ファイル(credentials.json)が見つかりません。data/credentials.json に配置するか、設定タブからアップロードしてください。")
+
+        creds_path = str(creds)
 
         log_step("Creating SpreadsheetService...")
         service = SpreadsheetService(credentials_path=creds_path)
@@ -96,6 +91,10 @@ async def sync_google_sheet(data: SpreadsheetSyncRequest):
             "message": message
         }
     except FileNotFoundError as e:
-        raise HTTPException(status_code=400, detail="認証ファイルが見つかりません。再アップロードしてください。")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"FileNotFoundError: {str(e)}")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"同期エラー: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"同期エラー: {type(e).__name__}: {str(e)}")

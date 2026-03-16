@@ -32,6 +32,14 @@ credentials.json
 data/OUTPUT_*.xlsx
 data/reconcile_*.xlsx
 
+# 環境変数（パスワード類）
+.env
+.env.*
+
+# 業務データ（CSV / Excel）
+*.csv
+*.xlsx
+
 # 設定ファイル（環境ごとに異なる）
 config/invoice_reconcile_settings.json
 

@@ -14,7 +14,7 @@ from features.vendor_invoice_reconcile.services.matcher import DepartmentMatcher
 from features.vendor_invoice_reconcile.services.reconciler import Reconciler
 from features.vendor_invoice_reconcile.utils.excel_generator import ExcelGenerator
 from infra.settings_repository import SettingsRepository as InfraSettingsRepo
-from infra.database import get_db, DB_PATH
+from infra.database import get_db, DB_PATH, resolve_credentials_path
 
 router = APIRouter(prefix="/api/reconcile", tags=["reconcile"])
 
@@ -344,7 +344,8 @@ async def sync_sheet(
         site_sheet_id = infra_repo.get_setting(conn, "site_sheet_id")
         site_dept_codes_str = infra_repo.get_setting(conn, "site_dept_codes")
         # 認証情報パスも取得（SpreadsheetServiceExtに渡すため）
-        creds_path = infra_repo.get_setting(conn, "google_credentials_path")
+        _stored_creds = infra_repo.get_setting(conn, "google_credentials_path")
+    creds_path = str(resolve_credentials_path(_stored_creds)) if resolve_credentials_path(_stored_creds) else None
         
     if not site_sheet_id:
         raise HTTPException(status_code=400, detail="現場案内用スプレッドシートIDが設定されていません")
@@ -499,15 +500,8 @@ async def sync_sheet(
         more_rows.sort(key=lambda x: (x["dept_code"], x["vendor_code"]))
         
         # マージモードでシート更新（既存データを維持し、「もれ」行を追記）
-        # 認証情報パスがない場合はデフォルトパスを使用
         if not creds_path:
-            from infra.database import DATA_DIR
-            default_creds = DATA_DIR / "credentials.json"
-            if default_creds.exists():
-                creds_path = str(default_creds)
-        
-        if not creds_path:
-            raise HTTPException(status_code=400, detail="認証ファイル(credentials.json)が設定されていません。設定タブからアップロードしてください。")
+            raise HTTPException(status_code=400, detail="認証ファイル(credentials.json)が見つかりません。data/credentials.json に配置するか、設定タブからアップロードしてください。")
         
         service = SpreadsheetServiceExt(credentials_path=creds_path)
         

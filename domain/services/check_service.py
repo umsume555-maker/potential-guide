@@ -3,12 +3,16 @@
 CSV取込 → 判定 → 出力の一連の処理を管理
 """
 import uuid
+import logging
 from datetime import datetime, date
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Set
 from dataclasses import dataclass
 
+logger = logging.getLogger(__name__)
+
 from infra.database import get_db, init_database
+from domain.services.result_saver import save_results as _save_results_func
 from infra.csv_loader import (
     load_csv, aggregate_by_base_invoice, 
     InvoiceSummary, get_yyyymm
@@ -41,7 +45,6 @@ class CheckResult:
     ng_count: int
     hold_count: int
     dash_count: int
-    excel_path: Optional[Path] = None
     excel_path: Optional[Path] = None
     error_message: Optional[str] = None
     # 正マスター情報
@@ -234,8 +237,7 @@ class CheckService:
                 
                 # 祝日チェック
                 if not self.holidays:
-                    # 祝日データがない場合は警告（エラー停止にしない）
-                    print("警告: 祝日データがありません。支払予定日チェックが正確でない可能性があります。")
+                    logger.warning("祝日データがありません。支払予定日チェックが正確でない可能性があります。")
                 
                 # CSV取込
                 rows = list(load_csv(csv_path))
@@ -247,7 +249,7 @@ class CheckService:
                 rows = [r for r in rows if r.dept_name and r.dept_name.strip() and r.dept_code and r.dept_code.strip()]
                 filtered_count = len(rows)
                 if initial_count != filtered_count:
-                    print(f"部門情報欠損により {initial_count - filtered_count} 行を除外しました。")
+                    logger.info("部門情報欠損により %d 行を除外しました。", initial_count - filtered_count)
                 
                 # 除外取引先をフィルタ
                 rows = [r for r in rows if r.vendor_code not in self.excluded_vendors]
@@ -474,7 +476,6 @@ class CheckService:
                         "base_invoice_no": summary.base_invoice_no,
                         "transaction_date": summary.transaction_date,
                         "payee_code": summary.payee_code,
-                        "vendor_payee_result": vp_result,
                         "payment_amount": summary.payment_amount,
                         "payment_date": summary.payment_date,
                         "payment_date_result": pd_result,
@@ -551,8 +552,8 @@ class CheckService:
                 """, (self.run_id, base_month, started_at, ended_at, "completed",
                       input_rows, len(summary_data), ng_count, hold_count, dash_count))
                 
-                # 結果保存 (output_summary/detail) - 修正
-                self._save_results(conn, self.run_id, summary_data, detail_data)
+                # 結果保存 (output_summary/detail)
+                _save_results_func(conn, self.run_id, summary_data, detail_data)
                 
                 # Excel出力
                 run_info = {
@@ -563,7 +564,6 @@ class CheckService:
                     "input_rows": input_rows,
                     "output_rows": len(summary_data),
                     "ng_count": ng_count,
-                    "hold_count": hold_count,
                     "hold_count": hold_count,
                     "dash_count": dash_count,
                 }
@@ -670,7 +670,7 @@ class CheckService:
                 )
             except Exception as e2:
                 # 診断や出力ごときで落ちては元も子もないのでログのみ
-                print(f"診断出力失敗: {e2}")
+                logger.error("診断出力失敗: %s", e2)
                 
             return CheckResult(
                 run_id=self.run_id,
@@ -795,113 +795,6 @@ class CheckService:
             
         return results
 
-
-    def _save_results(self, conn, run_id: str, summaries: List[Dict], details: List[Dict]):
-        """結果をDBに保存"""
-        # Summary
-        for s in summaries:
-            # OCR判定計算
-            ocr_val = str(s.get("ocr_amount") or "").replace(",", "").strip()
-            pay_val = str(s["payment_amount"] or "").strip()
-            ocr_match_status = "-"
-            
-            if not ocr_val:
-                ocr_match_status = "-"
-            else:
-                try:
-                    # 数値比較
-                    if float(ocr_val) == float(pay_val):
-                        ocr_match_status = "OK"
-                    else:
-                        ocr_match_status = "NG"
-                except:
-                    # 数値変換失敗時は文字列比較（完全一致かNGか）
-                    if ocr_val == pay_val:
-                        ocr_match_status = "OK"
-                    else:
-                        ocr_match_status = "NG"
-
-            conn.execute("""
-                INSERT INTO output_summary (
-                    run_id, base_invoice_no, decision_no, dept_code, dept_name,
-                    vendor_code, vendor_name, payee_code, payee_name,
-                    payment_amount, tax_category,
-                    account_code, account_name,
-                    payment_date, transaction_date, status,
-                    bank_account_info,
-                    ocr_amount, ocr_file_link, ocr_match_status,
-                    vendor_payee_result, tax_result, tax_expected,
-                    account_result, account_expected, account_expected_name,
-                    payment_date_result, payment_date_expected,
-                    anomaly_result, anomaly_type, is_monthly, overall_result,
-                    assigned_confirmed, assigned_proposed,
-                    amount_3m_ago, count_3m_ago,
-                    amount_2m_ago, count_2m_ago,
-                    amount_1m_ago, count_1m_ago,
-                    amount_current, count_current,
-                    amount_next, count_next
-                ) VALUES (
-                    ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?,
-                    ?, ?,
-                    ?, ?,
-                    ?, ?, ?,
-                    ?,
-                    ?, ?, ?,
-                    ?, ?, ?,
-                    ?, ?, ?,
-                    ?, ?,
-                    ?, ?, ?, ?,
-                    ?, ?,
-                    ?, ?,
-                    ?, ?,
-                    ?, ?,
-                    ?, ?,
-                    ?, ?
-                )
-            """, (
-                run_id, s["base_invoice_no"], s.get("decision_no", ""), s["dept_code"], s["dept_name"],
-                s["vendor_code"], s["vendor_name"], s["payee_code"], s.get("payee_name", ""),
-                s["payment_amount"], s["tax_category"],
-                s["account_code"], s.get("account_name", ""),
-                s["payment_date"], s["transaction_date"], s["status"],
-                s.get("bank_account_info", ""),
-                s.get("ocr_amount", ""), s.get("ocr_file_link", ""), ocr_match_status,
-                s["vendor_payee_result"], s["tax_result"], s["tax_expected"],
-                s["account_result"], s["account_expected"], s.get("account_expected_name", ""),
-                s["payment_date_result"], s["payment_date_expected"],
-                s["anomaly_result"], s["anomaly_type"], s["is_monthly"], s["overall_result"],
-            "", s["assignee"],
-            s.get("amount_3m_ago", 0), s.get("count_3m_ago", 0),
-            s.get("amount_2m_ago", 0), s.get("count_2m_ago", 0),
-            s.get("amount_1m_ago", 0), s.get("count_1m_ago", 0),
-            s.get("amount_current", 0), s.get("count_current", 0),
-            s.get("amount_next", 0), s.get("count_next", 0)
-        ))
-            
-        # Detail
-        for d in details:
-            conn.execute("""
-                INSERT INTO output_detail (
-                    run_id, invoice_no, base_invoice_no, branch_no,
-                    dept_code, dept_name, vendor_code, vendor_name,
-                    payee_code, payee_name, account_code, account_name,
-                    payment_amount, tax_category, tax_category_name,
-                    payment_date, transaction_date, status
-                ) VALUES (
-                    ?, ?, ?, ?,
-                    ?, ?, ?, ?,
-                    ?, ?, ?, ?,
-                    ?, ?, ?,
-                    ?, ?, ?
-                )
-            """, (
-                run_id, d["invoice_no"], d["base_invoice_no"], d["branch_no"],
-                d["dept_code"], d["dept_name"], d["vendor_code"], d["vendor_name"],
-                d["payee_code"], d.get("payee_name", ""), d["account_code"], d.get("account_name", ""),
-                d["payment_amount"], d["tax_category"], d.get("tax_category_name", ""),
-                d["payment_date"], d["transaction_date"], d["status"]
-            ))
 
 if __name__ == "__main__":
     # テスト実行
