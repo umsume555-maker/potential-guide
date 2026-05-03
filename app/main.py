@@ -3,6 +3,7 @@
 """
 import sys
 import logging
+import time
 from pathlib import Path
 
 # プロジェクトルートをパスに追加
@@ -24,6 +25,9 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+# 起動時のキャッシュバスター（サーバー再起動のたびに新しい値になる）
+STATIC_VER = str(int(time.time()))
 
 # アプリケーション作成
 app = FastAPI(
@@ -62,7 +66,7 @@ async def startup_event():
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     """メインページ"""
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse("index.html", {"request": request, "static_ver": STATIC_VER})
 
 
 @app.get("/health")

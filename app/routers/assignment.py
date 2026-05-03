@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 
 from infra.database import get_db
+from infra.csv_loader import normalize_dept_code
 
 router = APIRouter(prefix="/api/assignment", tags=["assignment"])
 
@@ -83,7 +84,7 @@ async def sync_from_input_data(csv_file: UploadFile = File(...)):
             
             # --- 部門同期 ---
             for _, row in dept_data.iterrows():
-                code = str(row["申請部門表示コード"]).strip()
+                code = normalize_dept_code(str(row["申請部門表示コード"]).strip())
                 name = str(row["申請部門名"]).strip()
                 
                 # 'nan' 文字列対策

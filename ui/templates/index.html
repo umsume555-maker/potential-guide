@@ -5,7 +5,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>支払依頼書チェックツール</title>
-  <link rel="stylesheet" href="/static/style.css?v=6">
+  <link rel="stylesheet" href="/static/style.css?v={{ static_ver }}">
 </head>
 
 <body>
@@ -18,7 +18,6 @@
           <div class="subtitle">CSV取込 → 判定 → Excel出力 ／ SQLite + FastAPI</div>
         </div>
       </div>
-      <div class="pill" id="lockStatus"><span class="dot"></span> ロック：未取得</div>
     </header>
 
     <nav class="tabs">
@@ -43,8 +42,11 @@
               ZIPフォルダ内の請求書をOCR解析し、結果をExcelでダウンロードできます。
             </p>
             <div style="display: flex; gap: 15px; justify-content: center;">
-              <button class="primary" id="btnRunOCR" style="font-size: 1.1em; padding: 12px 30px;">
+              <button class="primary" id="btnRunOCR" style="font-size: 1.1em; padding: 12px 30px;" title="Geminiで傾き補正あり（時間がかかります）">
                 ▶ 解析実行
+              </button>
+              <button class="primary" id="btnRunOCRFast" style="font-size: 1.1em; padding: 12px 30px;" title="傾き補正なしで高速処理">
+                ⚡ 高速解析
               </button>
               <button class="secondary" id="btnExportExcel" style="font-size: 1.1em; padding: 12px 30px;">
                 ⬇ Excel出力
@@ -59,7 +61,6 @@
           <div class="hd">
             <h3>解析結果一覧</h3>
             <div style="margin-left:auto; display:flex; gap:10px; align-items:center;">
-              <label><input type="checkbox" id="ocrFilterNG"> 不一致/警告のみ表示</label>
               <button class="secondary sm" id="btnRefreshOCR">更新</button>
             </div>
           </div>
@@ -68,19 +69,15 @@
               <table class="list-table">
                 <thead>
                   <tr>
-                    <th style="width:60px">判定</th>
                     <th>承認番号</th>
-                    <th>支払先 (申請)</th>
-                    <th style="text-align:right">申請金額</th>
-                    <th style="text-align:right">OCR金額</th>
-                    <th style="text-align:right">差額</th>
-                    <th>ファイル名</th>
-                    <th style="width:60px">詳細</th>
+                    <th>支払先</th>
+                    <th>ステータス</th>
+                    <th>ファイル</th>
                   </tr>
                 </thead>
                 <tbody id="ocrListBody">
                   <tr>
-                    <td colspan="8" style="text-align:center; color:var(--muted)">解析を実行してください</td>
+                    <td colspan="4" style="text-align:center; color:var(--muted)">解析を実行してください</td>
                   </tr>
                 </tbody>
               </table>
@@ -193,6 +190,36 @@
               <p class="hint" style="margin-top:10px;">「Unmapped」シートがある場合は、事業所名の紐付け設定を行ってください。</p>
             </div>
 
+            <!-- 請求一覧テーブル -->
+            <div id="reconcileDetailsArea"
+              style="margin-top:20px; border-top:1px dashed var(--line); padding-top:15px; display:none;">
+              <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                <h3 style="margin:0;">📋 請求一覧</h3>
+                <button id="btnReRunAfterRemap" class="primary sm" style="display:none;"
+                  onclick="reRunAfterRemap()">🔄 マッピング変更を適用して再突合</button>
+              </div>
+              <p class="hint">突合結果の一覧です。事業所の紐付けが誤っている場合は <strong>変更</strong> ボタンで修正できます。</p>
+              <div style="overflow-x:auto;">
+                <table class="list-table sm" id="reconcileDetailsTable">
+                  <thead>
+                    <tr>
+                      <th>請求書表記</th>
+                      <th>部門コード</th>
+                      <th>部門名</th>
+                      <th>第2候補コード</th>
+                      <th>第2候補部門名</th>
+                      <th style="text-align:right;">請求金額</th>
+                      <th style="text-align:right;">E2金額</th>
+                      <th style="text-align:right;">差異</th>
+                      <th style="width:120px; text-align:center;">ステータス</th>
+                      <th style="width:70px; text-align:center;">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="reconcileDetailsBody"></tbody>
+                </table>
+              </div>
+            </div>
+
             <!-- 未紐付けリスト (New) -->
             <div id="unmappedArea"
               style="margin-top:20px; border-top:1px dashed var(--line); padding-top:15px; display:none;">
@@ -215,9 +242,8 @@
             <div id="mappedArea"
               style="margin-top:20px; border-top:1px dashed var(--line); padding-top:15px; display:none;">
               <details>
-                <summary style="cursor:pointer; font-weight:bold; color:var(--text);">✅ 紐付け済みの事業所 (編集)</summary>
-                <p class="hint" style="margin-top:5px;">過去に紐付け登録した事業所の一覧です。必要に応じて修正できます。</p>
-
+                <summary style="cursor:pointer; font-weight:bold; color:var(--text);">✅ 紐付け済みの事業所 (今回ファイル分)</summary>
+                <p class="hint" style="margin-top:5px;">今回のファイルに登場した紐付け済み事業所です。必要に応じて修正できます。</p>
                 <table class="master-table">
                   <thead>
                     <tr>
@@ -227,6 +253,31 @@
                     </tr>
                   </thead>
                   <tbody id="mappedListBody"></tbody>
+                </table>
+              </details>
+            </div>
+
+            <!-- 全シノニム管理 -->
+            <div id="allSynonymsArea"
+              style="margin-top:20px; border-top:1px dashed var(--line); padding-top:15px; display:none;">
+              <details>
+                <summary style="cursor:pointer; font-weight:bold; color:var(--text);">⚙️ 全シノニム管理（登録済み全件）</summary>
+                <p class="hint" style="margin-top:5px;">この取引先に登録された全紐付けルールを表示・変更・削除できます。</p>
+                <div style="margin-bottom:8px;">
+                  <input type="text" id="synonymFilterInput" placeholder="名称で絞り込み..."
+                    style="padding:5px 8px; font-size:0.85em; border:1px solid var(--line); border-radius:4px; width:280px;"
+                    oninput="filterSynonymTable()">
+                </div>
+                <table class="list-table sm">
+                  <thead>
+                    <tr>
+                      <th>請求書表記（Raw名称）</th>
+                      <th>紐付け先 部門コード</th>
+                      <th>部門名</th>
+                      <th style="width:130px; text-align:center;">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="allSynonymsBody"></tbody>
                 </table>
               </details>
             </div>
@@ -334,6 +385,9 @@
 
                 <div class="row">
                   <button type="button" class="ghost" id="btnExceptionDeptManage" style="flex:1">⛔ 例外部門管理</button>
+                  <button type="button" class="ghost" id="btnExcludeVendorManage" style="flex:1">🚫 除外取引先管理</button>
+                </div>
+                <div class="row">
                   <button type="button" class="ghost" id="btnAiSetting" style="flex:1">🤖 AI設定管理</button>
                 </div>
 
@@ -366,6 +420,29 @@
 
                 <div style="margin-top:12px;text-align:right;">
                   <button type="button" class="ghost" id="btnCloseExceptionDeptDialog">閉じる</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- 除外取引先管理ダイアログ -->
+            <div id="excludeVendorDialog" class="modal" style="display:none;">
+              <div class="modal-content" style="max-width:520px;">
+                <h3>🚫 除外取引先管理</h3>
+                <p class="hint" style="margin:0 0 12px 0;">登録された取引先はチェック結果（Excel・スプレッドシート）に出力されません</p>
+
+                <div style="display:flex;gap:8px;margin-bottom:12px;">
+                  <input type="text" id="newExcludeCode" placeholder="取引先コード" style="flex:1;">
+                  <input type="text" id="newExcludeReason" placeholder="除外理由 (任意)" style="flex:1.5;">
+                  <button type="button" class="secondary" id="btnAddExclude">追加</button>
+                </div>
+
+                <div id="excludeVendorList"
+                  style="max-height:320px;overflow-y:auto;border:1px solid rgba(255,255,255,0.1);border-radius:4px;padding:8px;">
+                  <em style="color:#888;">読込中...</em>
+                </div>
+
+                <div style="margin-top:12px;text-align:right;">
+                  <button type="button" class="ghost" id="btnCloseExcludeVendorDialog">閉じる</button>
                 </div>
               </div>
             </div>
@@ -458,9 +535,8 @@
               <div class="row">
                 <input type="text" id="spreadsheetId" placeholder="スプレッドシートID (URLの /d/xxx/ の部分)" style="flex:2">
                 <div style="display:flex; flex-direction:column; gap:5px;">
-                  <button type="button" class="primary" id="btnSyncSheet" disabled>🚀 シート更新 (高速)</button>
-                  <button type="button" class="secondary" id="btnSyncSheetDrive" disabled style="font-size:0.9em;">☁
-                    シート更新 (証憑UL)</button>
+                  <button type="button" class="primary" id="btnSyncSheet" disabled>☁ シート更新 (証憑ULあり)</button>
+                  <button type="button" class="secondary" id="btnSyncSheetDrive" disabled style="display:none;"></button>
                 </div>
               </div>
               <div id="syncStatus" style="font-size:0.8em; margin-top:5px; color:var(--muted)">
@@ -602,16 +678,33 @@
             <!-- COST/SGA科目設定 -->
             <div class="sub-card" style="margin-top:10px;">
               <h3>② 科目ルール (COST/SGA)</h3>
-              <div class="row" style="gap:10px;">
-                <div style="flex:1">
+              <div class="row" style="gap:10px; align-items:flex-end;">
+
+                <!-- COST科目 -->
+                <div style="flex:1; position:relative;">
                   <label>COST科目</label>
-                  <input type="text" id="editCostAccount" placeholder="科目コード">
+                  <div style="display:flex; gap:4px;">
+                    <input type="text" id="editCostAccount" placeholder="科目コード" style="flex:1; min-width:0;">
+                    <button type="button" class="secondary sm" id="btnSearchCostAccount" title="科目を検索">🔍</button>
+                  </div>
+                  <div id="costAccountName" style="font-size:0.78em; color:var(--muted); margin-top:2px; min-height:16px;"></div>
+                  <!-- 候補ドロップダウン -->
+                  <div id="costAccountDropdown" class="account-dropdown" style="display:none;"></div>
                 </div>
-                <div style="flex:1">
+
+                <!-- SGA科目 -->
+                <div style="flex:1; position:relative;">
                   <label>SGA科目</label>
-                  <input type="text" id="editSgaAccount" placeholder="科目コード">
+                  <div style="display:flex; gap:4px;">
+                    <input type="text" id="editSgaAccount" placeholder="科目コード" style="flex:1; min-width:0;">
+                    <button type="button" class="secondary sm" id="btnSearchSgaAccount" title="科目を検索">🔍</button>
+                  </div>
+                  <div id="sgaAccountName" style="font-size:0.78em; color:var(--muted); margin-top:2px; min-height:16px;"></div>
+                  <!-- 候補ドロップダウン -->
+                  <div id="sgaAccountDropdown" class="account-dropdown" style="display:none;"></div>
                 </div>
-                <div style="flex:1; display:flex; align-items:flex-end;">
+
+                <div style="display:flex; align-items:flex-end; padding-bottom:20px;">
                   <button type="button" class="primary sm" id="btnSaveAccounts">保存</button>
                 </div>
               </div>
@@ -655,6 +748,43 @@
                   </tr>
                 </tfoot>
               </table>
+            </div>
+
+            <!-- 4. 注意事項 -->
+            <div class="sub-card" style="margin-top:10px;" id="vendorNoteSection">
+              <h3>④ 注意事項</h3>
+
+              <!-- 設定済みラベル（取引先選択後に表示） -->
+              <div style="font-size:0.8em; color:var(--muted); margin-bottom:4px;">この取引先の注意事項</div>
+              <div id="vendorNoteChips" style="display:flex; flex-wrap:wrap; gap:6px; min-height:28px; margin-bottom:10px;">
+                <span style="color:var(--muted); font-size:0.85em;">取引先を選択してください</span>
+              </div>
+
+              <!-- ラベル選択 + 追加 -->
+              <div class="row" style="gap:6px; align-items:center;">
+                <select id="noteSelect" style="flex:1; min-width:100px;">
+                  <option value="">-- ラベルを選択 --</option>
+                </select>
+                <button type="button" class="primary sm" id="btnAddVendorNote">＋追加</button>
+              </div>
+
+              <!-- 区切り -->
+              <div style="border-top:1px dashed rgba(255,255,255,0.1); margin:10px 0;"></div>
+
+              <!-- ラベルマスタ管理（常時表示） -->
+              <div style="font-size:0.8em; color:var(--muted); margin-bottom:6px;">ラベルマスタ（新規作成・削除）</div>
+
+              <!-- 新規ラベル作成 -->
+              <div class="row" style="gap:6px; align-items:center; margin-bottom:8px;">
+                <input type="text" id="newNoteLabel" placeholder="ラベル名 (5文字程度)" maxlength="10" style="flex:1;">
+                <button type="button" class="secondary sm" id="btnCreateNoteLabel">＋新規作成</button>
+              </div>
+
+              <!-- 登録済みラベル一覧（×で削除） -->
+              <div id="noteLabelList" style="display:flex; flex-wrap:wrap; gap:6px; min-height:24px;">
+                <span style="color:var(--muted); font-size:0.82em;">読込中…</span>
+              </div>
+              <div class="hint" style="margin-top:4px; font-size:0.78em;">※ラベルを削除すると全取引先の紐付きも削除されます</div>
             </div>
 
             <!-- 3. 勘定科目マスタ登録 (新規) -->
@@ -791,6 +921,21 @@
                 </div>
               </div>
             </div>
+
+            <div class="sub-card" style="margin-top:15px;">
+              <h3>⑤ Drive管理</h3>
+              <div style="margin-bottom:10px; font-size:0.9em; color:var(--muted);">
+                月次更新のタイミングで Google Drive 上の証憑ファイルを手動削除した後、
+                ローカルの Drive アップロード履歴（キャッシュ）をクリアします。
+              </div>
+              <div class="row">
+                <button type="button" class="danger" id="btnClearDriveCache">🗑 Driveキャッシュをクリア</button>
+                <span id="driveCacheStatus" style="margin-left:10px; font-size:0.9em; color:var(--muted);"></span>
+              </div>
+              <div style="font-size:0.8em; color:var(--warning); margin-top:5px;">
+                ※ Drive 側のファイルは削除しません。Drive のフォルダ整理は手動で行ってください。
+              </div>
+            </div>
           </div>
         </section>
       </div>
@@ -848,21 +993,6 @@
 
               <button type="submit" class="danger" id="btnSaveOverride">⚠ 強制修正を保存</button>
             </form>
-          </div>
-        </section>
-
-        <!-- 右: 有効なOverride一覧 -->
-        <section class="card">
-          <div class="hd">
-            <h2>有効な設定一覧</h2>
-            <button type="button" class="secondary sm" id="btnReloadOverride">更新</button>
-          </div>
-          <div class="bd">
-            <!-- 一覧表示機能はフェーズ2.5では「登録」がメインだが、確認用に見たい -->
-            <!-- 簡易的に実装 -->
-            <div style="color:var(--muted); font-size:0.9em;">
-              ※現在は登録機能のみ提供（DB直接確認推奨）
-            </div>
           </div>
         </section>
       </div>
@@ -938,77 +1068,7 @@
       </section>
     </div>
 
-    <!-- 除外取引先管理 -->
-    <section class="card" style="margin-top:15px;">
-      <div class="hd">
-        <h2>除外取引先 (Excluded Vendors)</h2>
-        <div style="font-size:0.8em; color:var(--muted)">これらに該当する取引先は、チェック結果（Excel）に出力されません。</div>
-      </div>
-      <div class="bd">
-        <div class="row" style="align-items: flex-end; margin-bottom:10px;">
-          <div style="flex:1">
-            <label>取引先コード</label>
-            <input type="text" id="newExcludeCode" placeholder="例: 99999999">
-          </div>
-          <div style="flex:2">
-            <label>除外理由</label>
-            <input type="text" id="newExcludeReason" placeholder="例: 社内間取引のため">
-          </div>
-          <div>
-            <button type="button" class="primary sm" id="btnAddExclude">＋ 追加</button>
-          </div>
-        </div>
-
-        <table class="master-table">
-          <thead>
-            <tr>
-              <th style="width: 20%">取引先コード</th>
-              <th style="width: 60%">理由</th>
-              <th style="width: 20%">操作</th>
-            </tr>
-          </thead>
-          <tbody id="excludeListBody">
-            <tr>
-              <td colspan="3" class="loading">Loading...</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
   </div><!-- /tab-assignment -->
-
-  <!-- 設定タブ (New) -->
-  <div id="tab-settings" class="tab-pane">
-    <div class="row">
-      <!-- AI Model Settings -->
-      <section class="card" style="flex:1">
-        <div class="hd">
-          <h2>AIモデル設定 (Gemini)</h2>
-          <div style="font-size:0.8em; color:var(--muted)">
-            AI-OCRで使用するモデルを指定します。変更後はアプリの再起動が必要です。
-          </div>
-        </div>
-        <div class="bd">
-          <div style="margin-bottom:15px">
-            <label>Model A (高精度 / デフォルト)</label>
-            <input type="text" id="settingModelA" placeholder="例: gemini-1.5-pro">
-            <div class="hint" style="color:#888;font-size:0.8em;">フラグ「1」または指定がない場合に使用されます。</div>
-          </div>
-          <div style="margin-bottom:15px">
-            <label>Model B (高速)</label>
-            <input type="text" id="settingModelB" placeholder="例: gemini-2.0-flash">
-            <div class="hint" style="color:#888;font-size:0.8em;">フラグ「2」の場合に使用されます。</div>
-          </div>
-          <div style="text-align:right">
-            <button type="button" class="primary" id="btnSaveAiModels">💾 設定を保存</button>
-          </div>
-        </div>
-      </section>
-
-      <!-- Placeholder for layout balance -->
-      <div style="flex:1"></div>
-    </div>
-  </div>
 
   <footer class="footer">
     支払依頼書チェックツール v1.0.0 | Python + SQLite + FastAPI
@@ -1017,12 +1077,12 @@
 
   <div id="toast" class="toast"></div>
 
-  <!-- OCR詳細モーダル (復元) -->
+  <!-- 請求書プレビューモーダル -->
   <div id="ocrPreviewModal" class="modal">
     <div class="modal-content wide"
       style="max-width: 90vw; height: 90vh; display:flex; flex-direction:column; padding:0;">
       <div class="hd" style="padding:15px; border-bottom:1px solid var(--border)">
-        <h2>OCR詳細プレビュー</h2>
+        <h2>請求書プレビュー</h2>
         <span class="close" id="btnCloseOCRModal">&times;</span>
       </div>
       <div class="bd" style="flex:1; display:flex; padding:0; overflow:hidden;">
@@ -1030,69 +1090,38 @@
         <div style="flex:1; border-right:1px solid var(--border); background:#f0f0f0;">
           <iframe id="ocrPdfFrame" style="width:100%; height:100%; border:none;"></iframe>
         </div>
-        <!-- 右: 詳細情報 -->
-        <div style="width: 350px; padding:20px; overflow-y:auto; background:var(--bg)">
-          <div style="margin-bottom:20px">
-            <h3 style="margin-bottom:10px; border-bottom:1px solid var(--active);">判定結果</h3>
-            <table class="detail-table">
-              <tr>
-                <th>承認番号</th>
-                <td id="detailApprovalNo">-</td>
-              </tr>
-              <tr>
-                <th>ファイル</th>
-                <td id="detailFileName" style="word-break:break-all; font-size:0.8em">-</td>
-              </tr>
-              <tr>
-                <th>信頼度スコア</th>
-                <td id="detailConfidence">-</td>
-              </tr>
-              <tr>
-                <th>OCR手法</th>
-                <td id="detailMethod">-</td>
-              </tr>
-            </table>
-          </div>
-
-          <div style="margin-bottom:20px">
-            <h3 style="margin-bottom:10px; border-bottom:1px solid var(--active);">金額照合</h3>
-            <table class="detail-table">
-              <tr>
-                <th>申請金額</th>
-                <td id="detailPaymentAmount" style="font-size:1.2em">-</td>
-              </tr>
-              <tr>
-                <th>検出金額</th>
-                <td id="detailDetectedAmount" style="font-size:1.2em">-</td>
-              </tr>
-              <tr>
-                <th>差額</th>
-                <td id="detailDiff" style="font-weight:bold">-</td>
-              </tr>
-            </table>
-            <div id="detailMessage" style="margin-top:10px; color:var(--ng); font-size:0.9em"></div>
-          </div>
-
-          <div>
-            <h3 style="margin-bottom:10px; border-bottom:1px solid var(--active);">その他抽出</h3>
-            <table class="detail-table">
-              <tr>
-                <th>インボイスNo</th>
-                <td id="detailInvoiceNo">-</td>
-              </tr>
-              <tr>
-                <th>軽減税率</th>
-                <td id="detailReducedTax">-</td>
-              </tr>
-            </table>
-          </div>
+        <!-- 右: ファイル情報 -->
+        <div style="width: 280px; padding:20px; overflow-y:auto; background:var(--bg)">
+          <h3 style="margin-bottom:10px; border-bottom:1px solid var(--active);">ファイル情報</h3>
+          <table class="detail-table">
+            <tr>
+              <th>承認番号</th>
+              <td id="detailApprovalNo" style="word-break:break-all; font-size:0.85em">-</td>
+            </tr>
+            <tr>
+              <th>支払先</th>
+              <td id="detailVendorName">-</td>
+            </tr>
+            <tr>
+              <th>ステータス</th>
+              <td id="detailStatus">-</td>
+            </tr>
+            <tr>
+              <th>ファイル名</th>
+              <td id="detailFileName" style="word-break:break-all; font-size:0.8em">-</td>
+            </tr>
+            <tr>
+              <th>稟議書</th>
+              <td id="detailHasRingi">-</td>
+            </tr>
+          </table>
         </div>
       </div>
     </div>
   </div>
 
-  <script src="/static/app.js?v=7"></script>
-  <script src="/static/reconcile.js?v=1"></script>
+  <script src="/static/app.js?v={{ static_ver }}"></script>
+  <script src="/static/reconcile.js?v={{ static_ver }}"></script>
 </body>
 
 </html>

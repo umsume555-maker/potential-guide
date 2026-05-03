@@ -2,11 +2,12 @@
 import json
 import gspread
 from pathlib import Path
-from oauth2client.service_account import ServiceAccountCredentials
 from typing import List, Dict, Optional
 import sqlite3
 from datetime import datetime
 from infra.drive_service import DriveService
+from infra.csv_loader import normalize_dept_code
+from infra.retry_utils import call_with_retry
 import os
 
 class SpreadsheetService:
@@ -16,13 +17,33 @@ class SpreadsheetService:
             "https://spreadsheets.google.com/feeds",
             "https://www.googleapis.com/auth/drive"
         ]
-        
+
+    # gspread API 呼び出しのタイムアウト秒数
+    _SHEETS_TIMEOUT = 120  # 秒
+
     def authenticate(self) -> gspread.Client:
         if not self.credentials_path.exists():
             raise FileNotFoundError(f"Credential file not found: {self.credentials_path}")
-        
-        creds = ServiceAccountCredentials.from_json_keyfile_name(str(self.credentials_path), self.scope)
-        return gspread.authorize(creds)
+
+        # gspread 6.x の正式API (google-auth ベース) — ConnectionError 時リトライ
+        client = call_with_retry(
+            gspread.service_account,
+            filename=str(self.credentials_path),
+            scopes=self.scope,
+            max_retries=3, delay=5.0
+        )
+
+        # セッションにタイムアウトを設定（ReadTimeout 防止）
+        try:
+            session = client.http_client.session  # gspread 6.x
+            session.timeout = self._SHEETS_TIMEOUT
+        except AttributeError:
+            try:
+                client.session.timeout = self._SHEETS_TIMEOUT  # 旧バージョン互換
+            except Exception:
+                pass
+
+        return client
 
     def fetch_data_from_db(self, db_path: str, run_id: str) -> List[Dict]:
         """指定されたRUN_IDの出力データを取得（例外部門を除外）"""
@@ -30,11 +51,16 @@ class SpreadsheetService:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute(
                 """
-                SELECT 
+                SELECT
                     o.base_invoice_no, o.dept_code, o.dept_name, o.vendor_code, o.vendor_name,
                     o.ocr_amount, o.ocr_file_link, o.ocr_drive_link, o.ocr_match_status,
-                    o.assigned_proposed as assignee, o.payment_amount, 
-                    o.transaction_date, o.payment_date, 
+                    COALESCE(
+                        NULLIF(av.assignee, ''),
+                        NULLIF(ad.assignee, ''),
+                        o.assigned_proposed,
+                        ''
+                    ) as assignee, o.payment_amount,
+                    o.transaction_date, o.payment_date,
                     o.payee_code, o.vendor_payee_result,
                     o.payment_date_result, o.payment_date_expected,
                     o.tax_category, o.tax_category_name, o.tax_result, o.tax_expected,
@@ -46,10 +72,16 @@ class SpreadsheetService:
                     o.amount_2m_ago, o.count_2m_ago,
                     o.amount_1m_ago, o.count_1m_ago,
                     o.amount_current, o.count_current,
-                    o.amount_next, o.count_next
+                    o.amount_next, o.count_next,
+                    (SELECT GROUP_CONCAT(nl.label, ' ')
+                     FROM masters_vendor_notes vn
+                     JOIN masters_note_labels nl ON nl.id = vn.label_id
+                     WHERE vn.vendor_code = o.vendor_code) as vendor_notes
                 FROM output_summary o
-                LEFT JOIN masters_exception_dept ex ON 
-                    (o.dept_code = ex.dept_code OR 
+                LEFT JOIN masters_assign_vendor av ON av.vendor_code = o.vendor_code
+                LEFT JOIN masters_assign_dept_override ad ON ad.dept_code = o.dept_code
+                LEFT JOIN masters_exception_dept ex ON
+                    (o.dept_code = ex.dept_code OR
                      CAST(o.dept_code AS INTEGER) = CAST(ex.dept_code AS INTEGER))
                 WHERE o.run_id = ?
                   AND ex.dept_code IS NULL  -- 例外部門を除外
@@ -131,97 +163,147 @@ class SpreadsheetService:
         except:
             return None
 
-    def _ensure_drive_upload(self, db_rows, db_path, run_id):
-        """未アップロードのファイルをDriveに上げ、リンクを更新する"""
+    def _load_drive_cache(self, db_path: str) -> dict:
+        """drive_file_cache テーブルから {file_name: drive_link} を返す"""
         try:
-            with open("upload_debug.log", "a", encoding="utf-8") as f:
-                f.write(f"=== Ensure Drive Upload Started : {datetime.now()} ===\n")
-                f.write(f"Total Rows: {len(db_rows)}\n")
+            with sqlite3.connect(db_path) as conn:
+                rows = conn.execute(
+                    "SELECT file_name, drive_link, drive_file_id FROM drive_file_cache"
+                ).fetchall()
+            return {r[0]: {"link": r[1], "file_id": r[2]} for r in rows}
+        except Exception as e:
+            print(f"[WARN] Failed to load drive_file_cache: {e}")
+            return {}
 
-            drive_service = DriveService(self.credentials_path)
-            # 保存先フォルダ (年単位などで分けると良いが、今回は固定)
-            folder_id = drive_service.ensure_folder("支払依頼チェックツール_証憑")
-            
-            # ZIP展開先ディレクトリ
+    def _save_drive_cache(self, db_path: str, entries: list):
+        """(file_name, drive_link, drive_file_id) のリストをキャッシュに保存"""
+        if not entries:
+            return
+        try:
+            with sqlite3.connect(db_path) as conn:
+                conn.executemany("""
+                    INSERT OR REPLACE INTO drive_file_cache (file_name, drive_link, drive_file_id)
+                    VALUES (?, ?, ?)
+                """, entries)
+                conn.commit()
+        except Exception as e:
+            print(f"[WARN] Failed to save drive_file_cache: {e}")
+
+    def _ensure_drive_upload(self, db_rows, db_path, run_id):
+        """未アップロードのファイルをDriveに上げ、リンクを更新する（キャッシュ + 逐次アップロード）"""
+        try:
+            # --- キャッシュ読み込み（テーブルがなければ自動作成）---
+            try:
+                with sqlite3.connect(db_path) as _c:
+                    _c.execute("""
+                        CREATE TABLE IF NOT EXISTS drive_file_cache (
+                            file_name TEXT PRIMARY KEY,
+                            drive_link TEXT NOT NULL,
+                            drive_file_id TEXT,
+                            uploaded_at TEXT DEFAULT (datetime('now', 'localtime'))
+                        )
+                    """)
+                    _c.commit()
+            except Exception as _e:
+                print(f"[WARN] drive_file_cache table ensure failed: {_e}")
+
+            cache = self._load_drive_cache(db_path)
+            print(f"[INFO] Drive cache: {len(cache)} files cached.")
+
             base_dir = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             zip_out_dir = base_dir / "invoice_ocr" / "ZIP_FILE_OUT"
-            
-            updates = []
-            
+
+            # ZIP_FILE_OUT 配下の全ファイルを1回だけ走査してマップ化
+            file_map = {}
+            for p in zip_out_dir.rglob("*"):
+                if p.is_file() and p.name not in file_map:
+                    file_map[p.name] = p
+
+            # --- 各行の処理: ocr_drive_link → キャッシュ → アップロード待ち ---
+            to_upload = []  # (row, fname, local_path)
+            cache_hits = 0
+
             for row in db_rows:
-                ocr_link = row.get("ocr_file_link")
+                # 1. すでにDB上にDriveリンクがある
                 drive_link = row.get("ocr_drive_link")
-                
-                # すでにDriveリンクがある場合、それを使って上書き(HYPERLINKのURL部分のみ差し替え)
                 if drive_link:
-                    # ローカルリンクが表示されている可能性があるので書き換え
-                     row["ocr_file_link"] = f'=HYPERLINK("{drive_link}", "リンク")'
-                     continue
-                
-                # Driveリンクがなく、ローカルリンクがある場合 -> アップロード対象
+                    row["ocr_file_link"] = f'=HYPERLINK("{drive_link}", "リンク")'
+                    continue
+
+                ocr_link = row.get("ocr_file_link")
                 if not ocr_link or "localhost" not in ocr_link:
                     continue
-                    
-                fname = self._extract_filename(ocr_link)
-                if not fname: continue
-                
-                local_path = zip_out_dir / fname
-                
-                # Debug log
-                with open("upload_debug.log", "a", encoding="utf-8") as f:
-                    f.write(f"Checking: {fname}\n")
 
-                if not local_path.exists():
-                    # 直下にない場合、サブフォルダを検索 (ZIP展開時にフォルダ付きだった場合など)
-                    found = list(zip_out_dir.rglob(fname))
-                    if found:
-                        local_path = found[0]
-                        with open("upload_debug.log", "a", encoding="utf-8") as f:
-                            f.write(f"  -> Found recursive: {local_path}\n")
-                    else:
-                        with open("upload_debug.log", "a", encoding="utf-8") as f:
-                            f.write(f"  -> Not found in {zip_out_dir}\n")
-                        print(f"[WARN] File not found for upload: {fname} in {zip_out_dir}")
-                        continue
-                    
-                # Upload
+                fname = self._extract_filename(ocr_link)
+                if not fname:
+                    continue
+
+                # 2. キャッシュにあれば Drive API 不要
+                if fname in cache:
+                    cached_link = cache[fname]["link"]
+                    row["ocr_drive_link"] = cached_link
+                    row["ocr_file_link"] = f'=HYPERLINK("{cached_link}", "リンク")'
+                    cache_hits += 1
+                    continue
+
+                # 3. キャッシュになければアップロード対象
+                local_path = file_map.get(fname)
+                if not local_path:
+                    print(f"[WARN] File not found for upload: {fname}")
+                    continue
+
+                to_upload.append((row, fname, local_path))
+
+            print(f"[INFO] Drive upload: cache_hits={cache_hits}, to_upload={len(to_upload)}")
+
+            if not to_upload:
+                return
+
+            # --- Drive サービス初期化（アップロードが必要な場合のみ）---
+            drive_service = DriveService(self.credentials_path)
+            # DBに保存された共有ドライブフォルダIDを使用（未設定時はフォルダ名で検索・作成）
+            try:
+                with sqlite3.connect(db_path) as _dc:
+                    _row = _dc.execute("SELECT value FROM app_settings WHERE key='drive_folder_id'").fetchone()
+                    folder_id = _row[0] if _row and _row[0] else None
+            except Exception:
+                folder_id = None
+            if not folder_id:
+                folder_id = drive_service.ensure_folder("支払依頼チェックツール_証憑")
+            print(f"[INFO] Drive upload target folder_id: {folder_id}")
+
+            # --- 逐次アップロード（Python 3.14 スレッド安定性のため）---
+            new_cache_entries = []
+            output_summary_updates = []
+
+            for i, (row, fname, local_path) in enumerate(to_upload):
                 try:
-                    uploaded_file = drive_service.upload_file(str(local_path), folder_id)
-                    web_link = uploaded_file.get('webViewLink')
-                    file_id = uploaded_file.get('id')
-                    
+                    print(f"[INFO] Uploading ({i+1}/{len(to_upload)}): {fname}")
+                    uploaded = drive_service.upload_file(str(local_path), folder_id)
+                    web_link = uploaded.get('webViewLink')
+                    file_id = uploaded.get('id')
                     if web_link:
-                        # DB更新用のリストに追加
-                        updates.append((web_link, file_id, run_id, fname))
-                        
-                        # メモリ上のデータも更新 (これが出力される)
-                        row["ocr_drive_link"] = web_link # for future check
+                        row["ocr_drive_link"] = web_link
                         row["ocr_file_link"] = f'=HYPERLINK("{web_link}", "リンク")'
-                        
-                        with open("upload_debug.log", "a", encoding="utf-8") as f:
-                            f.write(f"  -> Uploaded success. Link: {web_link}\n")
-                        
+                        new_cache_entries.append((fname, web_link, file_id))
+                        output_summary_updates.append((web_link, file_id, run_id, fname))
+                        # 10件ごとにキャッシュを中間保存（クラッシュ対策）
+                        if len(new_cache_entries) % 10 == 0:
+                            self._save_drive_cache(db_path, new_cache_entries[-10:])
                 except Exception as e:
-                    print(f"[ERROR] Failed to upload {fname}: {e}")
-            
-            # DB一括更新
-            if updates:
+                    print(f"[WARN] Upload failed for {fname}: {e}")
+
+            print(f"[INFO] Drive upload complete: {len(new_cache_entries)} new files uploaded.")
+
+            # --- キャッシュ保存 ---
+            self._save_drive_cache(db_path, new_cache_entries)
+
+            # --- output_summary の ocr_drive_link を更新 ---
+            if output_summary_updates:
                 with sqlite3.connect(db_path) as conn:
-                    # ファイル名(ocr_file_link内に含まれている)をキーにするのは少し不安定だが、他にキーがない
-                    # output_summaryには file_name カラムがない (file_name は invoice_ocr_results にある)
-                    # output_summary の ocr_file_link はテキスト型
-                    # ここは ocr_file_link like %fname% で更新するか？
-                    # あるいは base_invoice_no と dept_code で特定すべきだが、row にはそれがある。
-                    
-                    # しかしコード簡略化のため、updates にキー情報を含めるのがベター
-                    pass
-                    
-                # ループ内でDB更新する方が確実 (件数も多くないはず)
-                with sqlite3.connect(db_path) as conn:
-                    for link, fid, rid, fname in updates:
-                        # update query: ocr_file_link がそのファイル名を含んでいる行を更新
+                    for link, fid, rid, fname in output_summary_updates:
                         conn.execute("""
-                            UPDATE output_summary 
+                            UPDATE output_summary
                             SET ocr_drive_link = ?, ocr_drive_file_id = ?
                             WHERE run_id = ? AND ocr_file_link LIKE ?
                         """, (link, fid, rid, f"%{fname}%"))
@@ -229,20 +311,44 @@ class SpreadsheetService:
 
         except Exception as e:
             print(f"[ERROR] Drive Upload Fatal Error: {e}")
-            # エラーでも処理は続行 (アップロード失敗してもシート出力はする)
+            import traceback
+            traceback.print_exc()
 
     def sync_to_sheet(self, db_path: str, run_id: str, spreadsheet_id: str, upload_drive: bool = False):
         """DBデータをスプレッドシートに同期（マージ）"""
-        client = self.authenticate()
-        sh = client.open_by_key(spreadsheet_id)
-        sheet = sh.sheet1
-        
+        # リトライ付きで認証 & シート接続
+        import time as _time
+        for _attempt in range(3):
+            try:
+                client = self.authenticate()
+                sh = client.open_by_key(spreadsheet_id)
+                sheet = sh.sheet1
+                break
+            except Exception as _e:
+                if _attempt < 2:
+                    print(f"[WARN] Sheets 接続失敗 (attempt {_attempt+1}/3): {_e} - 5秒後リトライ...")
+                    _time.sleep(5)
+                else:
+                    raise
+
         # マスタシート準備 & 入力規則範囲取得
         range_str = self._setup_status_master(sh)
-        
-        # 1. 現状のデータを全取得
+
+        # 1. 現状のデータを全取得（リトライあり）
         # get_all_recordsはヘッダー重複でエラーになるため、get_all_valuesを使用して手動パースする
-        all_values = sheet.get_all_values()
+        for _attempt in range(3):
+            try:
+                all_values = sheet.get_all_values()
+                break
+            except Exception as _e:
+                if _attempt < 2:
+                    print(f"[WARN] get_all_values 失敗 (attempt {_attempt+1}/3): {_e} - 5秒後リトライ...")
+                    _time.sleep(5)
+                    client = self.authenticate()
+                    sh = client.open_by_key(spreadsheet_id)
+                    sheet = sh.sheet1
+                else:
+                    raise
         existing_header = all_values[0] if all_values else []
         existing_rows = all_values[1:] if len(all_values) > 1 else []
         
@@ -318,6 +424,7 @@ class SpreadsheetService:
             ("支払金額", "payment_amount"),
             ("担当", "assignee"),
             ("取引日付", "transaction_date"),
+            ("注意事項", "vendor_notes"),
             ("取引先コード", "vendor_code"),
             ("取引先名", "vendor_name"),
             ("申請部門コード", "dept_code"),
@@ -463,17 +570,33 @@ class SpreadsheetService:
             new_records.append(row_data)
 
         # 4. 書き込みデータの整形 (リストのリスト)
+        # __MULTI__形式の複数リンクはリッチテキストで後処理するため、
+        # ここではプレーンテキスト "リンク1 リンク2 ..." に置換して位置を記録する
+        link_col_idx = headers.index("リンク") if "リンク" in headers else -1
+        multi_link_cells = []  # (row_idx_0based, [url1, url2, ...])
+
         output_data = [headers]
-        for r in new_records:
-            output_data.append([r[col] for col in headers])
-            
+        for rec_idx, r in enumerate(new_records):
+            row_vals = [r[col] for col in headers]
+            if link_col_idx >= 0:
+                cell_val = row_vals[link_col_idx]
+                if isinstance(cell_val, str) and cell_val.startswith("__MULTI__"):
+                    urls = cell_val[len("__MULTI__"):].split("|")
+                    urls = [u for u in urls if u]
+                    # プレーンテキストに変換
+                    plain = " ".join(f"リンク{i+1}" for i in range(len(urls)))
+                    row_vals[link_col_idx] = plain
+                    # スプレッドシート上の行インデックス (ヘッダー行=0, データ1行目=1)
+                    multi_link_cells.append((rec_idx + 1, urls))
+            output_data.append(row_vals)
+
         # 5. 書き込みと整形 (安全更新)
         # sheet.clear() は書式設定（プルダウン等）も消すため使用しない。
         # 必要な範囲だけ値を更新し、余分な行は値をクリアする。
 
         # 全データを書き込む
         # 数式を有効にするため USER_ENTERED を指定
-        
+
         # 行数が足りない場合は拡張
         needed_rows = len(output_data) + 10 # 余裕を持たせる
         try:
@@ -483,8 +606,70 @@ class SpreadsheetService:
         except Exception as e:
             print(f"[WARN] Failed to resize sheet: {e}")
 
-        sheet.update(output_data, "A1", value_input_option='USER_ENTERED')
-        
+        call_with_retry(
+            sheet.update,
+            output_data, "A1",
+            value_input_option='USER_ENTERED',
+            max_retries=3, delay=10.0
+        )
+
+        # 複数リンクセルにリッチテキスト（textFormatRuns）を適用
+        if multi_link_cells and link_col_idx >= 0:
+            try:
+                LINK_COLOR = {"red": 0.06, "green": 0.43, "blue": 0.87}
+                rich_requests = []
+                for row_0, urls in multi_link_cells:
+                    labels = [f"リンク{i+1}" for i in range(len(urls))]
+                    # "リンク1 リンク2 ..." の文字列を構築し各セグメントのオフセットを計算
+                    text_runs = []
+                    pos = 0
+                    for i, (label, url) in enumerate(zip(labels, urls)):
+                        text_runs.append({
+                            "startIndex": pos,
+                            "format": {
+                                "link": {"uri": url},
+                                "foregroundColor": LINK_COLOR,
+                                "underline": True
+                            }
+                        })
+                        pos += len(label)
+                        if i < len(urls) - 1:
+                            # スペース部分はリンクなし
+                            text_runs.append({
+                                "startIndex": pos,
+                                "format": {"link": None, "foregroundColor": {"red": 0, "green": 0, "blue": 0}, "underline": False}
+                            })
+                            pos += 1  # スペース1文字
+
+                    full_text = " ".join(labels)
+                    rich_requests.append({
+                        "updateCells": {
+                            "rows": [{
+                                "values": [{
+                                    "userEnteredValue": {"stringValue": full_text},
+                                    "textFormatRuns": text_runs
+                                }]
+                            }],
+                            "range": {
+                                "sheetId": sheet.id,
+                                "startRowIndex": row_0,
+                                "endRowIndex": row_0 + 1,
+                                "startColumnIndex": link_col_idx,
+                                "endColumnIndex": link_col_idx + 1
+                            },
+                            "fields": "userEnteredValue,textFormatRuns"
+                        }
+                    })
+                if rich_requests:
+                    call_with_retry(
+                        sheet.spreadsheet.batch_update,
+                        {"requests": rich_requests},
+                        max_retries=3, delay=10.0
+                    )
+                    print(f"[INFO] Rich text applied to {len(rich_requests)} multi-link cells.")
+            except Exception as e:
+                print(f"[WARN] Failed to apply rich text links: {e}")
+
         # 行数が減った場合、残骸を消す（行自体は残す）
         # prev: len(existing_records) + 1
         current_row_count = len(existing_rows) + 1 
@@ -743,7 +928,11 @@ class SpreadsheetService:
                 })
 
                 # Execute Batch
-                sheet.spreadsheet.batch_update({"requests": requests})
+                call_with_retry(
+                    sheet.spreadsheet.batch_update,
+                    {"requests": requests},
+                    max_retries=3, delay=10.0
+                )
                 
             except Exception as e:
                 print(f"Format/Protect Error: {e}")
@@ -778,10 +967,26 @@ class SpreadsheetService:
                 site_sheet_id = match.group(1)
 
         try:
-            client = self.authenticate()
-            sh = client.open_by_key(site_sheet_id)
-            sheet = sh.sheet1
-            
+            import time as _time
+            for _attempt in range(3):
+                try:
+                    client = self.authenticate()
+                    sh = call_with_retry(client.open_by_key, site_sheet_id, max_retries=3, delay=5.0)
+                    sheet = sh.sheet1
+                    break
+                except (ConnectionError, ConnectionResetError, OSError) as _e:
+                    if _attempt < 2:
+                        print(f"[WARN] Site sheet 接続失敗 (attempt {_attempt+1}/3): {_e} - 5秒後リトライ...")
+                        _time.sleep(5)
+                    else:
+                        raise
+                except Exception as _e:
+                    if _attempt < 2:
+                        print(f"[WARN] Site sheet 接続失敗 (attempt {_attempt+1}/3): {_e} - 5秒後リトライ...")
+                        _time.sleep(5)
+                    else:
+                        raise
+
             # --- 1. DBデータ取得 & フィルタリング ---
             # 種別(anomaly_type)があるものだけ抽出
             db_rows = self._fetch_site_data(db_path, run_id)
@@ -799,7 +1004,7 @@ class SpreadsheetService:
                         base_month = row_bm[0]
                         # Output summary全量からペア取得
                         cursor = conn.execute("SELECT DISTINCT vendor_code, dept_code FROM output_summary WHERE run_id = ?", (run_id,)).fetchall()
-                        current_pairs = {(r[0], r[1]) for r in cursor}
+                        current_pairs = {(r[0], normalize_dept_code(r[1])) for r in cursor}
                         
                         from domain.validators.anomaly_check import find_missing_vendors
                         missing_rows = find_missing_vendors(conn, base_month, current_pairs)
@@ -844,6 +1049,7 @@ class SpreadsheetService:
                                 LEFT JOIN masters_exclude ex_v ON o.vendor_code = ex_v.vendor_code
                                 WHERE rl.base_month = ?
                                   AND o.anomaly_type = 'もれ'
+                                  AND COALESCE(o.payment_amount, 0) > 0
                                   AND ex_d.dept_code IS NULL
                                   AND ex_v.vendor_code IS NULL
                                 ORDER BY rl.started_at DESC
@@ -889,9 +1095,21 @@ class SpreadsheetService:
                 log["status"] = "cleared"
                 log["reason"] = "No data found (Sheet cleared)"
 
-            # --- 2. 既存データ取得 (Header + Body) ---
+            # --- 2. 既存データ取得 (Header + Body) リトライあり ---
             # site_status, site_comment を引き継ぐため
-            all_values = sheet.get_all_values()
+            for _attempt in range(3):
+                try:
+                    all_values = sheet.get_all_values()
+                    break
+                except Exception as _e:
+                    if _attempt < 2:
+                        print(f"[WARN] site get_all_values 失敗 (attempt {_attempt+1}/3): {_e} - 5秒後リトライ...")
+                        _time.sleep(5)
+                        client = self.authenticate()
+                        sh = client.open_by_key(site_sheet_id)
+                        sheet = sh.sheet1
+                    else:
+                        raise
             existing_header = all_values[0] if all_values else []
             existing_rows = all_values[1:] if len(all_values) > 1 else []
             
@@ -1179,8 +1397,9 @@ class SpreadsheetService:
                 LEFT JOIN masters_exception_dept ex_d ON o.dept_code = ex_d.dept_code
                 LEFT JOIN masters_exclude ex_v ON o.vendor_code = ex_v.vendor_code
                 WHERE o.run_id = ?
-                  AND o.anomaly_type IS NOT NULL 
+                  AND o.anomaly_type IS NOT NULL
                   AND o.anomaly_type != ''
+                  AND NOT (o.anomaly_type = 'もれ' AND COALESCE(o.payment_amount, 0) = 0)
                   AND ex_d.dept_code IS NULL
                   AND ex_v.vendor_code IS NULL
                 ORDER BY o.dept_code, o.vendor_code

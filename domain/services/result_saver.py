@@ -3,6 +3,7 @@
 check_service.py から分離した保存専用ロジック
 """
 from typing import List, Dict
+from infra.csv_loader import normalize_dept_code
 
 
 def save_results(conn, run_id: str, summaries: List[Dict], details: List[Dict]) -> None:
@@ -81,7 +82,7 @@ def _save_summaries(conn, run_id: str, summaries: List[Dict]) -> None:
                 run_id,
                 s["base_invoice_no"],
                 s.get("decision_no", ""),
-                s["dept_code"],
+                normalize_dept_code(s["dept_code"]),
                 s["dept_name"],
                 s["vendor_code"],
                 s["vendor_name"],
@@ -149,7 +150,7 @@ def _save_details(conn, run_id: str, details: List[Dict]) -> None:
                 d["invoice_no"],
                 d["base_invoice_no"],
                 d["branch_no"],
-                d["dept_code"],
+                normalize_dept_code(d["dept_code"]),
                 d["dept_name"],
                 d["vendor_code"],
                 d["vendor_name"],

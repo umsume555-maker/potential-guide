@@ -146,3 +146,17 @@ async def update_setting_value(data: SettingUpdate):
     with get_db() as conn:
         repo.set_setting(conn, data.key, data.value)
         return {"status": "ok", "message": f"設定 {data.key} を更新しました"}
+
+@router.post("/clear-drive-cache")
+async def clear_drive_cache():
+    """drive_file_cache テーブルを空にする（月次整理用）
+
+    Drive側のファイルは削除しない。Drive上のファイルを手動削除した後に
+    キャッシュとの整合を取るために使う。
+    """
+    with get_db() as conn:
+        cursor = conn.execute("SELECT COUNT(*) FROM drive_file_cache")
+        before = cursor.fetchone()[0]
+        conn.execute("DELETE FROM drive_file_cache")
+        conn.commit()
+    return {"status": "ok", "deleted": before, "message": f"Driveキャッシュをクリアしました ({before}件削除)"}

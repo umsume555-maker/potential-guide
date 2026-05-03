@@ -123,6 +123,17 @@ def init_database() -> None:
                 conn.execute("ALTER TABLE output_summary ADD COLUMN is_monthly TEXT")
                 logger.info("Migration: Added is_monthly column to output_summary")
 
+            # Drive ファイルキャッシュテーブル（ファイル名ベースの重複アップロード防止）
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS drive_file_cache (
+                    file_name   TEXT PRIMARY KEY,
+                    drive_link  TEXT NOT NULL,
+                    drive_file_id TEXT,
+                    uploaded_at TEXT DEFAULT (datetime('now', 'localtime'))
+                )
+            """)
+            logger.debug("Migration: Guaranteed drive_file_cache table")
+
             conn.commit()
         except Exception as e:
             logger.warning("Migration Warning: %s", e)

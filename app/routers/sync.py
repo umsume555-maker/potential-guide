@@ -52,38 +52,38 @@ async def sync_google_sheet(data: SpreadsheetSyncRequest):
         log_step("Creating SpreadsheetService...")
         service = SpreadsheetService(credentials_path=creds_path)
         
-        log_step(f"Starting sync_to_sheet for run_id={data.run_id}, spreadsheet_id={data.spreadsheet_id}")
-        count = service.sync_to_sheet(str(DB_PATH), data.run_id, data.spreadsheet_id, upload_drive=data.upload_drive)
-        log_step(f"sync_to_sheet complete: {count} rows")
-        
-        message = f"経理用シート更新: {count}行"
-        
-        # 現場用シート更新 (B案を有効化: Sync時にリセットをかけるため)
-        # 理由: チェック実行直後(Reconcile未実行)の場合、DBには「もれ」データが存在しない。
-        # この状態でSyncすることで現場シートを上書きし、前月の「もれ」データをクリア(リセット)できる。
+        # --- 現場用シートを先に更新 ---
+        # Drive アップロードより先に実行することで、アップロードの遅延に関わらず即時反映する
         with get_db() as conn:
             site_sheet_id = repo.get_setting(conn, "site_sheet_id")
-            
+
         log_step(f"Site sheet ID: {site_sheet_id}")
-        
+        message = ""
+
         if site_sheet_id:
             try:
-                log_step("Starting sync_site_sheet (Reset Mode)...")
-                # 現場更新 (部門フィルタなし)
+                log_step("Starting sync_site_sheet (before Drive upload)...")
                 site_log = service.sync_site_sheet(str(DB_PATH), data.run_id, site_sheet_id)
                 log_step(f"sync_site_sheet complete: {site_log}")
-                
+
                 if site_log.get("updated"):
-                    message += f"\n現場用シート更新: {site_log.get('rows_written', 0)}行"
+                    message += f"現場用シート更新: {site_log.get('rows_written', 0)}行\n"
                 else:
                     reason = site_log.get("reason", "Unknown")
                     print(f"Site sheet skipped: {reason}")
-                    
+
                 if site_log.get("status") == "error":
-                        message += f"\n現場用エラー: {site_log.get('error')}"
+                    message += f"現場用エラー: {site_log.get('error')}\n"
             except Exception as ex:
                 print(f"Site sync fatal error: {ex}")
-                message += f"\n現場用更新失敗: {ex}"
+                message += f"現場用更新失敗: {ex}\n"
+
+        # --- 経理用シート更新 (Drive アップロード含む) ---
+        log_step(f"Starting sync_to_sheet for run_id={data.run_id}, spreadsheet_id={data.spreadsheet_id}")
+        count = service.sync_to_sheet(str(DB_PATH), data.run_id, data.spreadsheet_id, upload_drive=data.upload_drive)
+        log_step(f"sync_to_sheet complete: {count} rows")
+
+        message += f"経理用シート更新: {count}行"
 
         log_step("Sync complete, returning response")
         return {

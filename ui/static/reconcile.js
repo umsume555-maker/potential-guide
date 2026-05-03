@@ -26,6 +26,10 @@ document.addEventListener('DOMContentLoaded', () => {
         } else {
             document.getElementById('monthlyStatusArea').style.display = 'none';
         }
+        // 取引先変更時に全シノニムを再読み込み
+        if (v && v !== "Loading..." && v !== "") {
+            loadAllSynonyms(v);
+        }
     };
     document.getElementById('reconcileVendorSelect').addEventListener('change', onConditionChange);
     document.getElementById('reconcileMonth').addEventListener('change', onConditionChange);
@@ -212,11 +216,17 @@ async function runReconcile(e) {
         document.getElementById('recCountMatched').textContent = data.summary.matched;
         document.getElementById('recCountRows').textContent = data.summary.reconciled_rows;
 
+        // Render Results Table (請求一覧)
+        renderDetailsTable(data.details || [], vendor);
+
         // Render Unmapped Items
         renderUnmappedItems(data.unmapped_items, vendor);
 
-        // Render Mapped Items
+        // Render Mapped Items (今回ファイル分)
         renderMappedItems(data.mapped_items, vendor);
+
+        // Render All Synonyms (登録済み全件)
+        loadAllSynonyms(vendor);
 
         // Setup Download Link
         const dlLink = document.getElementById('reconcileDownloadLink');
@@ -449,6 +459,395 @@ async function registerSynonym(vendorCode, rawName, deptCode1, deptCode2, btnEle
         btnElement.textContent = "登録";
     }
 }
+
+// ── 請求一覧テーブル ──────────────────────────────────────────
+
+let _remapPending = false; // マッピング変更後に再突合が必要か
+
+const STATUS_LABEL = {
+    'OK':                { text: 'OK',          cls: 'ok'      },
+    'MISSING':           { text: 'もれ',        cls: 'ng'      },
+    'RECURRING_MISSING': { text: '毎月なし',    cls: 'warn'    },
+    'DOUBLE_INPUT':      { text: '二重入力？',  cls: 'warn'    },
+    'DATE_GAP':          { text: '月ズレ？',    cls: 'warn'    },
+    'DATE_DIFF':         { text: '日付ズレ？',  cls: 'warn'    },
+    'UNMAPPED':          { text: '未紐付け',    cls: 'ng'      },
+    'EXCESS':            { text: 'EXCESS',      cls: 'ok'      },
+};
+
+function fmtAmt(v) {
+    if (v === '' || v === null || v === undefined) return '-';
+    const n = parseInt(v, 10);
+    return isNaN(n) ? '-' : n.toLocaleString('ja-JP') + '円';
+}
+
+function renderDetailsTable(details, vendorCode) {
+    const area   = document.getElementById('reconcileDetailsArea');
+    const tbody  = document.getElementById('reconcileDetailsBody');
+    const reRunBtn = document.getElementById('btnReRunAfterRemap');
+    tbody.innerHTML = '';
+    _remapPending = false;
+    reRunBtn.style.display = 'none';
+
+    if (!details || details.length === 0) {
+        area.style.display = 'none';
+        return;
+    }
+    area.style.display = 'block';
+
+    details.forEach((row, idx) => {
+        const sl = STATUS_LABEL[row.status] || { text: row.status || '-', cls: '' };
+        const rawLabel = (row.raw_dept_name && row.raw_dept_name !== row.dept_name)
+            ? `<span style="color:var(--text-secondary); font-size:0.85em;">${escHtml(row.raw_dept_name)}</span>`
+            : '<span style="color:var(--text-secondary);">-</span>';
+
+        const diff = row.diff_amount !== '' && row.diff_amount !== null && row.diff_amount !== undefined
+            ? parseInt(row.diff_amount, 10) : null;
+        const diffCell = (diff === null || isNaN(diff))
+            ? '-'
+            : (diff === 0 ? '<span style="color:green;">±0</span>'
+               : `<span style="color:${diff < 0 ? 'red' : 'orange'}">${diff.toLocaleString('ja-JP')}円</span>`);
+
+        const dept2Code = row.dept_code_2 || '';
+        const dept2Name = row.dept_name_2 || '';
+
+        const tr = document.createElement('tr');
+        tr.id = `detail-row-${idx}`;
+        tr.innerHTML = `
+            <td>${rawLabel}</td>
+            <td style="font-family:monospace; font-size:0.85em;">${escHtml(row.dept_code || '-')}</td>
+            <td>${escHtml(row.dept_name || '-')}</td>
+            <td style="font-family:monospace; font-size:0.85em; color:var(--text-secondary);">${dept2Code ? escHtml(dept2Code) : '<span style="color:var(--text-secondary);">-</span>'}</td>
+            <td style="color:var(--text-secondary);">${dept2Name ? escHtml(dept2Name) : '<span style="color:var(--text-secondary);">-</span>'}</td>
+            <td style="text-align:right;">${fmtAmt(row.invoice_amount)}</td>
+            <td style="text-align:right;">${fmtAmt(row.e2_amount)}</td>
+            <td style="text-align:right;">${diffCell}</td>
+            <td style="text-align:center;">
+                <span class="badge ${sl.cls}">${escHtml(sl.text)}</span>
+            </td>
+            <td style="text-align:center;">
+                <button class="sm secondary" onclick="toggleRemapRow(${idx}, '${escHtml(row.raw_dept_name || row.dept_name)}', '${escHtml(vendorCode)}')">変更</button>
+            </td>`;
+        tbody.appendChild(tr);
+
+        // マッピング変更用の隠し行
+        const editTr = document.createElement('tr');
+        editTr.id = `detail-edit-${idx}`;
+        editTr.style.display = 'none';
+        editTr.style.background = 'var(--bg-alt, #f8f9fa)';
+        editTr.dataset.deptCode  = row.dept_code  || '';
+        editTr.dataset.deptCode2 = row.dept_code_2 || '';
+        editTr.innerHTML = `
+            <td colspan="10" style="padding:12px 16px;">
+                <div style="font-size:0.85em; color:var(--text-secondary); margin-bottom:8px;">
+                    「<strong>${escHtml(row.raw_dept_name || row.dept_name)}</strong>」の紐付け先を変更:
+                </div>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:8px;">
+                    <div>
+                        <label style="font-size:0.8em; color:var(--text-secondary);">部門候補 1 (Main)</label>
+                        <input type="text" placeholder="絞り込み..." id="filter-remap-${idx}"
+                            style="width:100%; margin:3px 0; padding:4px 6px; font-size:0.85em; border:1px solid var(--line); border-radius:3px;"
+                            oninput="filterDeptSelect('remap-select-${idx}', this.value)">
+                        <select id="remap-select-${idx}"
+                            style="width:100%; padding:4px 6px; font-size:0.85em; border:1px solid var(--line); border-radius:3px;">
+                            <option value="">-- 事業所を選択 --</option>
+                            ${cachedDepartments.map(d => `<option value="${escHtml(d.code)}">${escHtml(d.name)} (${escHtml(d.code)})</option>`).join('')}
+                        </select>
+                    </div>
+                    <div>
+                        <label style="font-size:0.8em; color:var(--text-secondary);">部門候補 2 (Sub/任意)</label>
+                        <input type="text" placeholder="絞り込み..." id="filter-remap2-${idx}"
+                            style="width:100%; margin:3px 0; padding:4px 6px; font-size:0.85em; border:1px solid var(--line); border-radius:3px;"
+                            oninput="filterDeptSelect('remap-select2-${idx}', this.value)">
+                        <select id="remap-select2-${idx}"
+                            style="width:100%; padding:4px 6px; font-size:0.85em; border:1px solid var(--line); border-radius:3px;">
+                            <option value="">-- 未設定 --</option>
+                            ${cachedDepartments.map(d => `<option value="${escHtml(d.code)}">${escHtml(d.name)} (${escHtml(d.code)})</option>`).join('')}
+                        </select>
+                    </div>
+                </div>
+                <div style="display:flex; gap:8px;">
+                    <button class="primary sm" id="remap-btn-${idx}"
+                        onclick="applyRemap(${idx}, '${escHtml(row.raw_dept_name || row.dept_name)}', '${escHtml(vendorCode)}')">登録</button>
+                    <button class="secondary sm"
+                        onclick="toggleRemapRow(${idx}, '', '')">閉じる</button>
+                </div>
+            </td>`;
+        tbody.appendChild(editTr);
+    });
+}
+
+function escHtml(s) {
+    return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+function toggleRemapRow(idx, rawName, vendorCode) {
+    const editTr = document.getElementById(`detail-edit-${idx}`);
+    if (!editTr) return;
+    const isOpen = editTr.style.display !== 'none';
+    editTr.style.display = isOpen ? 'none' : 'table-row';
+    if (!isOpen) {
+        // 現在の紐付け値を初期選択
+        const curCode  = editTr.dataset.deptCode  || '';
+        const curCode2 = editTr.dataset.deptCode2 || '';
+        const sel  = document.getElementById(`remap-select-${idx}`);
+        const sel2 = document.getElementById(`remap-select2-${idx}`);
+        if (sel  && curCode)  sel.value  = curCode;
+        if (sel2 && curCode2) sel2.value = curCode2;
+        document.getElementById(`filter-remap-${idx}`).focus();
+    }
+}
+
+// 共通: 部門ドロップダウン絞り込み (selectId を直接指定)
+function filterDeptSelect(selectId, filterText) {
+    const sel = document.getElementById(selectId);
+    if (!sel) return;
+    const q = filterText.toLowerCase();
+    Array.from(sel.options).forEach(opt => {
+        if (!opt.value) { opt.style.display = ''; return; }
+        opt.style.display = opt.text.toLowerCase().includes(q) ? '' : 'none';
+    });
+}
+
+async function applyRemap(idx, rawName, vendorCode) {
+    const sel  = document.getElementById(`remap-select-${idx}`);
+    const sel2 = document.getElementById(`remap-select2-${idx}`);
+    const btn  = document.getElementById(`remap-btn-${idx}`);
+    const deptCode  = sel.value;
+    const deptCode2 = sel2 ? sel2.value : '';
+    if (!deptCode) { alert('部門候補1を選択してください'); return; }
+
+    btn.disabled = true;
+    btn.textContent = '...';
+
+    const formData = new FormData();
+    formData.append('vendor_code', vendorCode);
+    formData.append('raw_name', rawName);
+    formData.append('dept_code', deptCode);
+    if (deptCode2) formData.append('dept_code_2', deptCode2);
+
+    try {
+        const res = await fetch('/api/reconcile/synonyms', { method: 'POST', body: formData });
+        if (!res.ok) throw new Error(await res.text());
+
+        btn.textContent = '済 ✓';
+        btn.style.background = 'var(--ok, #4caf50)';
+
+        // 元の行を更新表示
+        // 列順: [0]請求書表記 [1]部門コード [2]部門名 [3]第2候補コード [4]第2候補部門名
+        //       [5]請求金額 [6]E2金額 [7]差異 [8]ステータス [9]操作
+        const mainTr = document.getElementById(`detail-row-${idx}`);
+        if (mainTr) {
+            const selectedOpt = sel.options[sel.selectedIndex];
+            mainTr.cells[1].textContent = deptCode;
+            mainTr.cells[2].textContent = selectedOpt ? selectedOpt.text.replace(` (${deptCode})`, '') : '';
+            if (deptCode2) {
+                const opt2 = sel2 ? sel2.options[sel2.selectedIndex] : null;
+                mainTr.cells[3].textContent = deptCode2;
+                mainTr.cells[4].textContent = opt2 ? opt2.text.replace(` (${deptCode2})`, '') : '';
+            } else {
+                mainTr.cells[3].innerHTML = '<span style="color:var(--text-secondary);">-</span>';
+                mainTr.cells[4].innerHTML = '<span style="color:var(--text-secondary);">-</span>';
+            }
+            mainTr.cells[8].innerHTML = '<span class="badge warn">要再突合</span>';
+        }
+
+        // 編集行の data 属性を更新（次回開いたとき新しい値が初期選択される）
+        const editTr2 = document.getElementById(`detail-edit-${idx}`);
+        if (editTr2) {
+            editTr2.dataset.deptCode  = deptCode;
+            editTr2.dataset.deptCode2 = deptCode2;
+        }
+
+        // 編集行を閉じる
+        document.getElementById(`detail-edit-${idx}`).style.display = 'none';
+
+        // 再突合ボタン表示
+        _remapPending = true;
+        document.getElementById('btnReRunAfterRemap').style.display = 'inline-block';
+
+    } catch (e) {
+        alert('登録エラー: ' + e.message);
+        btn.disabled = false;
+        btn.textContent = '登録';
+    }
+}
+
+function reRunAfterRemap() {
+    if (!confirm('マッピングを更新して再突合します。\n同じファイルで再実行しますか？')) return;
+    document.getElementById('btnRunReconcile').click();
+}
+
+// ── ここまで請求一覧テーブル ──────────────────────────────────────
+
+// ── 全シノニム管理 ────────────────────────────────────────────────
+
+let _allSynonymsVendor = '';
+let _allSynonymsData = [];
+
+async function loadAllSynonyms(vendorCode) {
+    const area = document.getElementById('allSynonymsArea');
+    if (!vendorCode) { area.style.display = 'none'; return; }
+    try {
+        const res = await fetch(`/api/reconcile/synonyms/${encodeURIComponent(vendorCode)}`);
+        if (!res.ok) { area.style.display = 'none'; return; }
+        const data = await res.json();
+        _allSynonymsVendor = vendorCode;
+        _allSynonymsData = data;
+        renderAllSynonymsTable(data, vendorCode);
+        area.style.display = data.length > 0 ? 'block' : 'none';
+    } catch (e) {
+        console.error('Failed to load synonyms', e);
+        area.style.display = 'none';
+    }
+}
+
+function renderAllSynonymsTable(synonyms, vendorCode) {
+    const tbody = document.getElementById('allSynonymsBody');
+    tbody.innerHTML = '';
+    if (!synonyms || synonyms.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="4" style="text-align:center; color:var(--text-secondary);">登録済みシノニムはありません</td></tr>';
+        return;
+    }
+    synonyms.forEach((s, idx) => {
+        // 部門名をキャッシュから検索
+        const deptObj = cachedDepartments.find(d => d.code === s.dept_code);
+        const deptName = deptObj ? deptObj.name : (s.dept_code || '-');
+        const code2Label = s.dept_code_2 ? ` / ${s.dept_code_2}` : '';
+
+        const tr = document.createElement('tr');
+        tr.dataset.rawName = s.raw_name.toLowerCase();
+        tr.innerHTML = `
+            <td>${escHtml(s.raw_name)}</td>
+            <td style="font-family:monospace; font-size:0.85em;">
+                ${escHtml(s.dept_code)}${escHtml(code2Label)}
+            </td>
+            <td>${escHtml(deptName)}</td>
+            <td style="text-align:center;">
+                <button class="sm secondary" style="margin-right:4px;"
+                    onclick="openSynonymEdit(${idx})">変更</button>
+                <button class="sm" style="background:rgba(255,92,112,.2); border-color:rgba(255,92,112,.4);"
+                    onclick="deleteSynonym(${idx}, '${escHtml(s.raw_name)}', '${escHtml(vendorCode)}')">削除</button>
+            </td>`;
+        tbody.appendChild(tr);
+
+        // インライン編集行
+        const editTr = document.createElement('tr');
+        editTr.id = `syn-edit-${idx}`;
+        editTr.style.display = 'none';
+        editTr.style.background = 'var(--bg-alt, #f8f9fa)';
+        editTr.innerHTML = `
+            <td colspan="4" style="padding:12px 16px;">
+                <div style="font-size:0.85em; color:var(--text-secondary); margin-bottom:8px;">
+                    「<strong>${escHtml(s.raw_name)}</strong>」の変更先:
+                </div>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:8px;">
+                    <div>
+                        <label style="font-size:0.8em; color:var(--text-secondary);">部門候補 1 (Main)</label>
+                        <input type="text" placeholder="絞り込み..." id="syn-filter-${idx}"
+                            style="width:100%; margin:3px 0; padding:4px 6px; font-size:0.85em; border:1px solid var(--line); border-radius:3px;"
+                            oninput="filterDeptSelect('syn-select-${idx}', this.value)">
+                        <select id="syn-select-${idx}"
+                            style="width:100%; padding:4px 6px; font-size:0.85em; border:1px solid var(--line); border-radius:3px;">
+                            <option value="">-- 部門を選択 --</option>
+                            ${cachedDepartments.map(d =>
+                                `<option value="${escHtml(d.code)}" ${d.code === s.dept_code ? 'selected' : ''}>${escHtml(d.name)} (${escHtml(d.code)})</option>`
+                            ).join('')}
+                        </select>
+                    </div>
+                    <div>
+                        <label style="font-size:0.8em; color:var(--text-secondary);">部門候補 2 (Sub/任意)</label>
+                        <input type="text" placeholder="絞り込み..." id="syn-filter2-${idx}"
+                            style="width:100%; margin:3px 0; padding:4px 6px; font-size:0.85em; border:1px solid var(--line); border-radius:3px;"
+                            oninput="filterDeptSelect('syn-select2-${idx}', this.value)">
+                        <select id="syn-select2-${idx}"
+                            style="width:100%; padding:4px 6px; font-size:0.85em; border:1px solid var(--line); border-radius:3px;">
+                            <option value="">-- 未設定 --</option>
+                            ${cachedDepartments.map(d =>
+                                `<option value="${escHtml(d.code)}" ${d.code === s.dept_code_2 ? 'selected' : ''}>${escHtml(d.name)} (${escHtml(d.code)})</option>`
+                            ).join('')}
+                        </select>
+                    </div>
+                </div>
+                <div style="display:flex; gap:8px;">
+                    <button class="primary sm" id="syn-save-${idx}"
+                        onclick="saveSynonymEdit(${idx}, '${escHtml(s.raw_name)}', '${escHtml(vendorCode)}')">保存</button>
+                    <button class="secondary sm"
+                        onclick="document.getElementById('syn-edit-${idx}').style.display='none'">閉じる</button>
+                </div>
+            </td>`;
+        tbody.appendChild(editTr);
+    });
+}
+
+function filterSynonymTable() {
+    const q = document.getElementById('synonymFilterInput').value.toLowerCase();
+    const tbody = document.getElementById('allSynonymsBody');
+    Array.from(tbody.rows).forEach(tr => {
+        if (tr.id && tr.id.startsWith('syn-edit-')) return; // 編集行はスキップ
+        const rawName = (tr.dataset.rawName || '');
+        tr.style.display = rawName.includes(q) ? '' : 'none';
+    });
+}
+
+function openSynonymEdit(idx) {
+    // 他の編集行を閉じる
+    document.querySelectorAll('[id^="syn-edit-"]').forEach(el => el.style.display = 'none');
+    const editTr = document.getElementById(`syn-edit-${idx}`);
+    if (editTr) {
+        editTr.style.display = 'table-row';
+        document.getElementById(`syn-filter-${idx}`).focus();
+    }
+}
+
+async function saveSynonymEdit(idx, rawName, vendorCode) {
+    const sel  = document.getElementById(`syn-select-${idx}`);
+    const sel2 = document.getElementById(`syn-select2-${idx}`);
+    const btn  = document.getElementById(`syn-save-${idx}`);
+    const deptCode  = sel.value;
+    const deptCode2 = sel2 ? sel2.value : '';
+    if (!deptCode) { alert('部門候補1を選択してください'); return; }
+
+    btn.disabled = true;
+    btn.textContent = '...';
+
+    const formData = new FormData();
+    formData.append('vendor_code', vendorCode);
+    formData.append('raw_name', rawName);
+    formData.append('dept_code', deptCode);
+    if (deptCode2) formData.append('dept_code_2', deptCode2);
+
+    try {
+        const res = await fetch('/api/reconcile/synonyms', { method: 'POST', body: formData });
+        if (!res.ok) throw new Error(await res.text());
+
+        // テーブルを再読み込み
+        await loadAllSynonyms(vendorCode);
+        document.getElementById('btnReRunAfterRemap').style.display = 'inline-block';
+        _remapPending = true;
+    } catch (e) {
+        alert('保存エラー: ' + e.message);
+        btn.disabled = false;
+        btn.textContent = '保存';
+    }
+}
+
+async function deleteSynonym(idx, rawName, vendorCode) {
+    if (!confirm(`「${rawName}」の紐付けを削除しますか？`)) return;
+
+    try {
+        const res = await fetch(
+            `/api/reconcile/synonyms/${encodeURIComponent(vendorCode)}?raw_name=${encodeURIComponent(rawName)}`,
+            { method: 'DELETE' }
+        );
+        if (!res.ok) throw new Error(await res.text());
+        await loadAllSynonyms(vendorCode);
+    } catch (e) {
+        alert('削除エラー: ' + e.message);
+    }
+}
+
+// ── ここまで全シノニム管理 ────────────────────────────────────────
 
 function renderVendorOptions(vendors) {
     const select = document.getElementById('reconcileVendorSelect');

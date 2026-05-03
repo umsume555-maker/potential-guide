@@ -8,6 +8,7 @@ import sqlite3
 
 from features.vendor_invoice_reconcile.models import TemplateConfig, RunInfo
 from features.vendor_invoice_reconcile.repositories.settings_repository import SettingsRepository
+from infra.csv_loader import normalize_dept_code as _norm_dept_code
 from features.vendor_invoice_reconcile.repositories.master_repository import MasterRepository
 from features.vendor_invoice_reconcile.services.extractor import ExtractorFactory
 from features.vendor_invoice_reconcile.services.matcher import DepartmentMatcher
@@ -88,6 +89,37 @@ async def get_departments():
     depts = master_repo.get_department_master()
     # Sort by code
     return sorted([{"code": k, "name": v} for k, v in depts.items()], key=lambda x: x["code"])
+
+@router.get("/synonyms/{vendor_code}")
+async def get_synonyms(vendor_code: str):
+    """取引先の全シノニム（紐付けルール）一覧を取得"""
+    config = settings_repo.get_template(vendor_code)
+    if not config:
+        return []
+    result = []
+    for raw_name, dept_codes in config.dept_synonyms.items():
+        if isinstance(dept_codes, list):
+            code1 = dept_codes[0] if len(dept_codes) > 0 else ""
+            code2 = dept_codes[1] if len(dept_codes) > 1 else ""
+        else:
+            code1 = str(dept_codes)
+            code2 = ""
+        result.append({"raw_name": raw_name, "dept_code": code1, "dept_code_2": code2})
+    return sorted(result, key=lambda x: x["raw_name"])
+
+@router.delete("/synonyms/{vendor_code}")
+async def delete_synonym(vendor_code: str, raw_name: str):
+    """シノニム（紐付けルール）を削除"""
+    config = settings_repo.get_template(vendor_code)
+    if not config:
+        raise HTTPException(status_code=400, detail="Template not found")
+    normalized = raw_name.replace('\u3000', ' ').strip()
+    normalized = " ".join(normalized.split())
+    if normalized in config.dept_synonyms:
+        del config.dept_synonyms[normalized]
+        settings_repo.save_template(config)
+        return {"status": "success", "message": f"Deleted '{normalized}'"}
+    raise HTTPException(status_code=404, detail="Synonym not found")
 
 @router.post("/synonyms")
 async def update_synonyms(
@@ -248,7 +280,7 @@ def run_reconcile(
                         status, anomaly_type, base_invoice_no, is_monthly
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
-                    run_id, res.dept_code, res.dept_name, res.vendor_code, res.vendor_name,
+                    run_id, _norm_dept_code(res.dept_code), res.dept_name, res.vendor_code, res.vendor_name,
                     res.payment_amount, res.invoice_amount, res.transaction_date,
                     res.status, anomaly_type, base_inv, res.is_monthly
                 ))
@@ -277,13 +309,29 @@ def run_reconcile(
                     }
         mapped_items_list = sorted(list(mapped_items_map.values()), key=lambda x: x["raw_name"])
         
+        # 第2候補の部門名解決用マスタ
+        _dept_master = master_repo.get_department_master()
+
         # Details for Sync
         details_list = []
         for r in results:
             if r.dept_code:
+                # raw_dept_name: 請求書から抽出された元の事業所名表記
+                raw_name = ""
+                dept_code_2 = ""
+                dept_name_2 = ""
+                if r.details:
+                    raw_name = r.details[0].raw_dept_name or ""
+                    codes = r.details[0].candidate_dept_codes or []
+                    if len(codes) >= 2:
+                        dept_code_2 = codes[1]
+                        dept_name_2 = _dept_master.get(dept_code_2, "")
                 details_list.append({
                     "dept_code": r.dept_code,
                     "dept_name": r.dept_name,
+                    "dept_code_2": dept_code_2,
+                    "dept_name_2": dept_name_2,
+                    "raw_dept_name": raw_name,
                     "vendor_code": r.vendor_code or vendor_code,
                     "vendor_name": r.vendor_name,
                     "invoice_amount": r.invoice_amount,
@@ -408,7 +456,18 @@ async def sync_sheet(
             if not is_target:
                 print(f"[SYNC_DEBUG]   -> SKIPPED (not in allowed list)")
                 continue
-            
+
+            # 「もれ」かつ金額0円はスキップ
+            if status == "MISSING" or anomaly_type == "もれ":
+                inv_amt_check = item.get("invoice_amount", 0)
+                try:
+                    inv_amt_check = int(float(inv_amt_check))
+                except:
+                    inv_amt_check = 0
+                if inv_amt_check == 0:
+                    print(f"[SYNC_DEBUG]   -> SKIPPED (もれ 0円)")
+                    continue
+
             print(f"[SYNC_DEBUG]   -> ACCEPTED")
             
             # 金額判定: ステータスに応じて参照する金額を変える
@@ -581,17 +640,18 @@ def _calculate_monthly_status(vendor_code: str, base_month: str):
                 py -= 1
             past_months.append(f"{py:04d}-{pm:02d}")
             
-        dept_codes = [d["dept_code"] for d in depts]
-        
-        monthly_flags = {}
-        for d in depts:
-            monthly_flags[d["dept_code"]] = False
-            
+        from infra.csv_loader import normalize_dept_code as _norm_dc
+
+        # 部門コードを8桁正規化して累積/output_summary間の桁数差異を吸収
+        dept_codes = [_norm_dc(d["dept_code"]) for d in depts]
+        dc_orig_map = {_norm_dc(d["dept_code"]): d for d in depts}
+
+        monthly_flags = {dc: False for dc in dept_codes}
         history_counts = {dc: 0 for dc in dept_codes}
-        
+
         for pm in past_months:
             rows = repo.get_cumulative_data(pm, [vendor_code])
-            seen_depts = set(r["dept_code"] for r in rows)
+            seen_depts = set(_norm_dc(r["dept_code"]) for r in rows)
             for dc in seen_depts:
                 if dc in history_counts:
                     history_counts[dc] += 1
@@ -605,32 +665,37 @@ def _calculate_monthly_status(vendor_code: str, base_month: str):
         current_statuses = {}
         
         with get_db() as conn:
-            runs = conn.execute("""
-                SELECT run_id FROM run_log WHERE base_month = ? AND input_rows < 150 ORDER BY started_at ASC
-            """, (base_month,)).fetchall()
-            target_run_ids = [r[0] for r in runs]
-            
-            if target_run_ids:
-                placeholders = ",".join(["?"] * len(target_run_ids))
-                sql = f"""
+            # 各(vendor, dept_code)について最新runの値のみ使用する
+            # 古いrunの結果が残り続けるのを防ぐため、vendor_codeごとの最新run_idを特定する
+            latest_run = conn.execute("""
+                SELECT run_id FROM run_log
+                WHERE base_month = ? AND input_rows < 150
+                  AND run_id IN (
+                      SELECT DISTINCT run_id FROM output_summary WHERE vendor_code = ?
+                  )
+                ORDER BY started_at DESC LIMIT 1
+            """, (base_month, vendor_code)).fetchone()
+
+            if latest_run:
+                latest_run_id = latest_run[0]
+                rows = conn.execute("""
                     SELECT dept_code, payment_amount, status
                     FROM output_summary
-                    WHERE vendor_code = ? AND run_id IN ({placeholders})
-                """
-                params = [vendor_code] + target_run_ids
-                rows = conn.execute(sql, params).fetchall()
+                    WHERE vendor_code = ? AND run_id = ?
+                """, (vendor_code, latest_run_id)).fetchall()
                 for r in rows:
-                    current_amounts[r["dept_code"]] = r["payment_amount"]
-                    current_statuses[r["dept_code"]] = r["status"]
-            
+                    dc_norm = _norm_dc(r["dept_code"])
+                    current_amounts[dc_norm] = r["payment_amount"]
+                    current_statuses[dc_norm] = r["status"]
+
         # 4. Build Result
         result = []
-        for d in depts:
-            dc = d["dept_code"]
-            dn = d["dept_name"]
+        for dc in dept_codes:
+            d = dc_orig_map.get(dc, {})
+            dn = d.get("dept_name", "")
             is_monthly = "毎月" if monthly_flags.get(dc) else ""
             amt = current_amounts.get(dc, 0)
-            
+
             status = current_statuses.get(dc, "")
             
             # Skip if 0 amount AND no significant status
@@ -645,13 +710,12 @@ def _calculate_monthly_status(vendor_code: str, base_month: str):
                      continue
             
             result.append({
-                "dept_code": dc,
+                "dept_code": dc,  # 正規化済み8桁コード
                 "dept_name": dn,
                 "is_monthly": is_monthly,
                 "payment_amount": amt,
                 "status": status,
                 "vendor_code": vendor_code,
-                # "vendor_name": d.get("vendor_name", "") # MasterRepository result doesn't have vendor_name usually
             })
             
         return result

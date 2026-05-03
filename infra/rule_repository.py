@@ -19,14 +19,39 @@ class RuleRepository:
 
     # --- 共通ヘルパー ---
 
+    @staticmethod
+    def normalize_dept_code(code: Optional[str]) -> str:
+        """部門コードを正規化（8桁ゼロパディング）"""
+        if code is None:
+            return ""
+        s = str(code).strip()
+        if s.endswith(".0"):
+            s = s[:-2]
+        # masters_departmentは8桁ゼロパディング形式
+        if s.isdigit() and len(s) < 8:
+            s = s.zfill(8)
+        return s
+
     def get_dept_type(self, conn: sqlite3.Connection, dept_code: str) -> Optional[str]:
         """部門コードから部門タイプを取得"""
+        norm = self.normalize_dept_code(dept_code)
         cursor = conn.execute(
             "SELECT dept_type FROM masters_department WHERE dept_code = ?",
-            (self.normalize_code(dept_code),)
+            (norm,)
         )
         row = cursor.fetchone()
-        return row[0] if row else None
+        if row:
+            return row[0]
+        # フォールバック: そのままのコードで再検索（8桁超など）
+        raw = self.normalize_code(dept_code)
+        if raw != norm:
+            cursor = conn.execute(
+                "SELECT dept_type FROM masters_department WHERE dept_code = ?",
+                (raw,)
+            )
+            row = cursor.fetchone()
+            return row[0] if row else None
+        return None
 
     def get_override(self, conn: sqlite3.Connection, vendor_code: str, dept_code: str, field_name: str) -> Optional[str]:
         """強制修正値を取得 (有効なもののみ)"""
@@ -191,12 +216,12 @@ class RuleRepository:
         if row:
             return row[0]
 
-        # 3. Rule: DEPT_TYPE
+        # 3. Rule: DEPT_TYPE (exact match)
         dept_type = self.get_dept_type(conn, d_code)
         if dept_type:
             cursor = conn.execute(
                 """
-                SELECT expected_account FROM rule_account_master 
+                SELECT expected_account FROM rule_account_master
                 WHERE vendor_code = ? AND scope_type = 'DEPT_TYPE' AND scope_key = ?
                 """,
                 (v_code, dept_type)
@@ -204,11 +229,26 @@ class RuleRepository:
             row = cursor.fetchone()
             if row:
                 return row[0]
-        
+
+        # 3b. Rule: DEPT_TYPE fallback (他の DEPT_TYPE ルールを代用)
+        #   COST/SGA どちらか一方しか登録がない場合、もう一方の部門からの請求にも適用する
+        cursor = conn.execute(
+            """
+            SELECT expected_account FROM rule_account_master
+            WHERE vendor_code = ? AND scope_type = 'DEPT_TYPE'
+            ORDER BY scope_key
+            LIMIT 1
+            """,
+            (v_code,)
+        )
+        row = cursor.fetchone()
+        if row:
+            return row[0]
+
         # 4. Rule: ANY
         cursor = conn.execute(
             """
-            SELECT expected_account FROM rule_account_master 
+            SELECT expected_account FROM rule_account_master
             WHERE vendor_code = ? AND scope_type = 'ANY'
             """,
             (v_code,)

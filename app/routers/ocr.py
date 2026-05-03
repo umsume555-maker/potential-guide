@@ -22,33 +22,22 @@ router = APIRouter(
 class OCRResultItem(BaseModel):
     approval_no: Optional[str]
     file_name: Optional[str]
-    detected_amount: Optional[int]
-    detected_invoice_no: Optional[str]
-    detected_date: Optional[str]
-    confidence: Optional[float]
-    match_status: Optional[str]
-    amount_diff: Optional[int]
-    
-    # 申請データ（突合相手）
     vendor_name: Optional[str]
-    payment_amount: Optional[int]
-    
-    # メタデータ
-    ocr_method: Optional[str]
-    has_reduced_tax: Optional[int]
-    has_ringi: Optional[int]
+    dept_name: Optional[str]
     status: Optional[str]
+    has_ringi: Optional[int]
 
 class OCRAnalysisResponse(BaseModel):
     message: str
     run_id: str
 
 @router.post("/analyze", response_model=OCRAnalysisResponse)
-async def analyze_invoices(background_tasks: BackgroundTasks, resume: bool = False):
+async def analyze_invoices(background_tasks: BackgroundTasks, resume: bool = False, fast: bool = False):
     """OCR解析と突合を実行（バックグラウンド処理）
-    
+
     Args:
         resume: Trueの場合、既存データを削除せず続きから再開
+        fast: Trueの場合、Geminiによる傾き補正をスキップして高速化
     """
     
     # 最新の run_id を取得
@@ -86,37 +75,50 @@ async def analyze_invoices(background_tasks: BackgroundTasks, resume: bool = Fal
             
             zip_out_path.mkdir(parents=True, exist_ok=True)
             
+            EFS_FLAG = 0x800  # ZIP仕様: General purpose bit 11 = EFS(UTF-8)
             for zip_file in zip_files:
                 try:
-                    # 展開 (CP932対応: Windowsで作成されたZIP対策)
+                    extracted = 0
+                    failed = 0
                     with zipfile.ZipFile(zip_file, 'r') as zf:
                         for info in zf.infolist():
-                            try:
-                                # 文字化け対策: 多段階デコード試行
-                                # Windows ZIPは通常 cp932 だが、ツールによっては UTF-8 (フラグなし) の場合もある
-                                # まずバイト列に戻す
-                                raw_filename = info.filename.encode('cp437')
-                                
+                            # EFSフラグが立っていなければ cp437 経由で raw bytes を取り直し、
+                            # cp932 → UTF-8 の順に厳密デコード。両方失敗時は cp932(ignore)
+                            # で不正バイトを捨てて展開を続行する（\ufffd を生成しない）
+                            if not (info.flag_bits & EFS_FLAG):
                                 try:
-                                    # 1. UTF-8 で試す (strict: 正しいUTF-8ならエラーにならないはず)
-                                    info.filename = raw_filename.decode('utf-8')
-                                except UnicodeDecodeError:
-                                    # 2. CP932 で試す (replace: 一部壊れていても強行して読める部分だけ読む)
-                                    # ログ解析の結果、Shift-JISと思われるが一部バイトが不正なケースがあるため
-                                    info.filename = raw_filename.decode('cp932', errors='replace')
-                            except Exception:
-                                # encode('cp437') 自体が失敗した場合は何もしない
-                                pass
-                            
-                            zf.extract(info, path=str(zip_out_path))
+                                    raw = info.filename.encode('cp437')
+                                except UnicodeEncodeError:
+                                    raw = None
 
-                    print(f"[INFO] Extracted: {zip_file.name}")
-                    
+                                if raw is not None:
+                                    decoded = None
+                                    for enc in ('cp932', 'utf-8'):
+                                        try:
+                                            decoded = raw.decode(enc)
+                                            break
+                                        except UnicodeDecodeError:
+                                            continue
+                                    if decoded is None:
+                                        decoded = raw.decode('cp932', errors='ignore')
+                                    info.filename = decoded
+
+                            # 個別ファイル単位で try：1ファイル失敗でも残りは展開継続
+                            try:
+                                zf.extract(info, path=str(zip_out_path))
+                                extracted += 1
+                            except Exception as fe:
+                                failed += 1
+                                # ファイル名は ASCII safe な repr で出力
+                                print(f"[WARN] Skip file in {zip_file.name}: {ascii(info.filename)} ({type(fe).__name__})")
+
+                    print(f"[INFO] Extracted: {zip_file.name} (ok={extracted}, skip={failed})")
+
                     # 削除
                     os.remove(zip_file)
                     print(f"[INFO] Deleted: {zip_file.name}")
                 except Exception as e:
-                    print(f"[ERROR] Failed to process {zip_file.name}: {e}")
+                    print(f"[ERROR] Failed to process {zip_file.name}: {type(e).__name__}: {ascii(str(e))}")
     
     if not zip_out_path.exists():
         raise HTTPException(status_code=404, detail=f"Invoice directory not found: {zip_out_path}")
@@ -137,7 +139,7 @@ async def analyze_invoices(background_tasks: BackgroundTasks, resume: bool = Fal
     
     # バックグラウンドで実行
     service = InvoiceMatchService(DB_PATH)
-    background_tasks.add_task(service.process_and_match, run_id, zip_out_path)
+    background_tasks.add_task(service.process_and_match, run_id, zip_out_path, fast)
     
     return {"message": "OCR analysis started in background", "run_id": run_id}
 
@@ -228,33 +230,22 @@ async def get_ocr_progress():
     }
 
 @router.get("/results", response_model=List[OCRResultItem])
-async def get_ocr_results(status: Optional[str] = None):
+async def get_ocr_results():
     """OCR突合結果を取得"""
     run_id = _get_latest_run_id()
     if not run_id:
         return []
         
     query = """
-        SELECT 
-            r.approval_no, r.file_name, r.detected_amount, r.detected_invoice_no,
-            r.detected_date,
-            r.confidence, r.match_status, r.amount_diff, r.ocr_method, 
-            r.has_reduced_tax, r.has_ringi, s.status,
-            s.vendor_name, s.payment_amount
+        SELECT
+            r.approval_no, r.file_name,
+            r.vendor_name, r.dept_name, r.status, r.has_ringi
         FROM invoice_ocr_results r
-        LEFT JOIN output_summary s 
-            ON r.run_id = s.run_id 
-            AND r.approval_no = s.decision_no
         WHERE r.run_id = ?
+        ORDER BY r.approval_no, r.file_name
     """
     params = [run_id]
-    
-    if status:
-        query += " AND r.match_status = ?"
-        params.append(status)
-        
-    query += " ORDER BY r.match_status DESC, r.approval_no" # NG/WARNING first
-    
+
     results = []
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
@@ -263,18 +254,10 @@ async def get_ocr_results(status: Optional[str] = None):
             results.append({
                 "approval_no": row["approval_no"],
                 "file_name": row["file_name"],
-                "detected_amount": row["detected_amount"],
-                "detected_invoice_no": row["detected_invoice_no"],
-                "detected_date": row["detected_date"],
-                "confidence": row["confidence"],
-                "match_status": row["match_status"],
-                "amount_diff": row["amount_diff"],
-                "ocr_method": row["ocr_method"],
-                "has_reduced_tax": row["has_reduced_tax"],
-                "has_ringi": row["has_ringi"],
-                "status": row["status"],
                 "vendor_name": row["vendor_name"],
-                "payment_amount": row["payment_amount"]
+                "dept_name": row["dept_name"],
+                "status": row["status"],
+                "has_ringi": row["has_ringi"],
             })
             
     return results

@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from infra.database import get_db, init_database
 from infra.holiday_api import fetch_holidays_sync, save_holidays_to_db, check_holidays_coverage
-from infra.csv_loader import load_vendor_master_csv, load_department_master_csv, load_account_rule_csv, load_vendor_rule_csv, load_account_master_csv, load_exception_dept_csv
+from infra.csv_loader import load_vendor_master_csv, load_department_master_csv, load_account_rule_csv, load_vendor_rule_csv, load_account_master_csv, load_exception_dept_csv, normalize_dept_code
 from infra.rule_repository import RuleRepository
 
 
@@ -674,7 +674,7 @@ async def upload_exception_dept(
                     INSERT INTO masters_exception_dept (dept_code, dept_name, reason)
                     VALUES (?, ?, ?)
                     """,
-                    (row["dept_code"], row["dept_name"], row["reason"])
+                    (normalize_dept_code(row["dept_code"]), row["dept_name"], row["reason"])
                 )
                 count += 1
             
@@ -711,7 +711,7 @@ async def add_exception_dept(data: ExceptionDeptInput):
                 dept_name = excluded.dept_name,
                 reason = excluded.reason
             """,
-            (data.dept_code, data.dept_name, data.reason)
+            (normalize_dept_code(data.dept_code), data.dept_name, data.reason)
         )
         return {"status": "ok", "message": "登録しました"}
 
@@ -759,3 +759,96 @@ async def update_ai_setting(data: AiSetting):
             msg = "設定を保存しました"
             
         return {"status": "ok", "message": msg}
+
+
+# ============================================================
+# 取引先注意事項（ラベル管理 + 取引先紐付け）
+# ============================================================
+
+class NoteLabelCreate(BaseModel):
+    label: str  # 5文字程度
+
+class VendorNoteCreate(BaseModel):
+    vendor_code: str
+    label_id: int
+
+
+@router.get("/note-labels")
+async def list_note_labels():
+    """注意事項ラベル一覧を取得"""
+    with get_db() as conn:
+        cursor = conn.execute(
+            "SELECT id, label FROM masters_note_labels ORDER BY id"
+        )
+        return [dict(r) for r in cursor.fetchall()]
+
+
+@router.post("/note-labels")
+async def create_note_label(data: NoteLabelCreate):
+    """注意事項ラベルを新規追加"""
+    label = data.label.strip()
+    if not label:
+        raise HTTPException(status_code=400, detail="ラベル名を入力してください")
+    with get_db() as conn:
+        try:
+            cursor = conn.execute(
+                "INSERT INTO masters_note_labels (label) VALUES (?)",
+                (label,)
+            )
+            return {"status": "ok", "id": cursor.lastrowid, "label": label}
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"既に同じラベルが存在します: {label}")
+
+
+@router.delete("/note-labels/{label_id}")
+async def delete_note_label(label_id: int):
+    """注意事項ラベルを削除（紐付きも削除）"""
+    with get_db() as conn:
+        conn.execute("DELETE FROM masters_vendor_notes WHERE label_id = ?", (label_id,))
+        conn.execute("DELETE FROM masters_note_labels WHERE id = ?", (label_id,))
+        return {"status": "ok", "message": "削除しました"}
+
+
+@router.get("/vendor-notes/{vendor_code}")
+async def get_vendor_notes(vendor_code: str):
+    """取引先に設定された注意事項を取得"""
+    with get_db() as conn:
+        cursor = conn.execute("""
+            SELECT vn.id, vn.label_id, nl.label
+            FROM masters_vendor_notes vn
+            JOIN masters_note_labels nl ON nl.id = vn.label_id
+            WHERE vn.vendor_code = ?
+            ORDER BY vn.id
+        """, (vendor_code,))
+        return [dict(r) for r in cursor.fetchall()]
+
+
+@router.post("/vendor-notes")
+async def add_vendor_note(data: VendorNoteCreate):
+    """取引先に注意事項ラベルを紐付け"""
+    with get_db() as conn:
+        try:
+            cursor = conn.execute(
+                "INSERT INTO masters_vendor_notes (vendor_code, label_id) VALUES (?, ?)",
+                (data.vendor_code, data.label_id)
+            )
+            # ラベル名も返す
+            row = conn.execute(
+                "SELECT id, label FROM masters_note_labels WHERE id = ?", (data.label_id,)
+            ).fetchone()
+            return {
+                "status": "ok",
+                "id": cursor.lastrowid,
+                "label_id": data.label_id,
+                "label": row["label"] if row else ""
+            }
+        except Exception as e:
+            raise HTTPException(status_code=400, detail="既にこのラベルは設定済みです")
+
+
+@router.delete("/vendor-notes/{note_id}")
+async def delete_vendor_note(note_id: int):
+    """取引先の注意事項紐付けを削除"""
+    with get_db() as conn:
+        conn.execute("DELETE FROM masters_vendor_notes WHERE id = ?", (note_id,))
+        return {"status": "ok", "message": "削除しました"}

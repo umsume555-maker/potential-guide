@@ -575,8 +575,8 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // 共通Sync関数
-    async function runSheetSync(isDriveUpload) {
+    // 共通Sync関数（常にDriveアップロードあり）
+    async function runSheetSync() {
         // ID抽出 (URLが貼られた場合も対応)
         const rawId = spreadsheetId.value.trim();
         // URL形式 (/d/xxxxxxxx/...) からIDを抽出
@@ -592,21 +592,14 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        // 確認メッセージ
-        let msg = 'スプレッドシートを更新しますか？\n（プルダウンや手入力ステータスは維持されます）';
-        if (isDriveUpload) {
-            msg += '\n\n【重要】\n証憑ファイルのアップロードを行うため、時間がかかります。\n（数分～数十分かかる場合があります）';
-        } else {
-            msg += '\n\n※証憑アップロードは行いません（リンクは更新されません）';
-        }
-
+        const msg = 'スプレッドシートを更新しますか？\n（プルダウンや手入力ステータスは維持されます）\n\n証憑ファイルをGoogle Driveへアップロードします。\n初回は数分かかる場合があります。';
         if (!confirm(msg)) return;
 
         // ボタン制御
         if (btnSyncSheet) btnSyncSheet.disabled = true;
         if (btnSyncSheetDrive) btnSyncSheetDrive.disabled = true;
 
-        if (syncStatus) syncStatus.textContent = isDriveUpload ? '⏳ 同期中 (証憑ULあり)...' : '⏳ 同期中 (高速)...';
+        if (syncStatus) syncStatus.textContent = '⏳ 同期中 (証憑アップロードあり)...';
 
         try {
             const res = await fetch('/api/sync/google-sheet', {
@@ -615,7 +608,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 body: JSON.stringify({
                     run_id: currentRunId,
                     spreadsheet_id: sheetId,
-                    upload_drive: isDriveUpload
+                    upload_drive: true
                 })
             });
             const data = await res.json();
@@ -636,10 +629,10 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     if (btnSyncSheet) {
-        btnSyncSheet.addEventListener('click', () => runSheetSync(false));
+        btnSyncSheet.addEventListener('click', () => runSheetSync());
     }
     if (btnSyncSheetDrive) {
-        btnSyncSheetDrive.addEventListener('click', () => runSheetSync(true));
+        btnSyncSheetDrive.addEventListener('click', () => runSheetSync());
     }
 
     // 月次更新
@@ -827,10 +820,19 @@ document.addEventListener('DOMContentLoaded', () => {
             // COST/SGA科目を設定
             const editCostAccount = document.getElementById('editCostAccount');
             const editSgaAccount = document.getElementById('editSgaAccount');
-            if (editCostAccount) editCostAccount.value = rule.cost_account || "";
-            if (editSgaAccount) editSgaAccount.value = rule.sga_account || "";
+            if (editCostAccount) {
+                editCostAccount.value = rule.cost_account || "";
+                if (editCostAccount._resolveOnSet) editCostAccount._resolveOnSet(rule.cost_account || "");
+            }
+            if (editSgaAccount) {
+                editSgaAccount.value = rule.sga_account || "";
+                if (editSgaAccount._resolveOnSet) editSgaAccount._resolveOnSet(rule.sga_account || "");
+            }
 
             loadAccountRules(rule.vendor_code);
+
+            // 注意事項を読み込む
+            if (window.loadVendorNotes) window.loadVendorNotes(rule.vendor_code);
         } catch (e) {
             console.error("selectVendor error:", e);
             showError("選択処理でエラーが発生しました: " + e.message);
@@ -873,6 +875,116 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    // ---- 科目検索ドロップダウン共通ロジック ----
+    function setupAccountSearch(inputId, btnId, dropdownId, nameDisplayId) {
+        const input    = document.getElementById(inputId);
+        const btn      = document.getElementById(btnId);
+        const dropdown = document.getElementById(dropdownId);
+        const nameDisp = document.getElementById(nameDisplayId);
+        if (!input || !dropdown) return;
+
+        let currentItems = [];
+        let highlightIdx = -1;
+
+        // 科目名をコードから取得して表示
+        async function resolveAccountName(code) {
+            if (!nameDisp || !code) { if (nameDisp) nameDisp.textContent = ''; return; }
+            try {
+                const r = await fetch(`/api/master/account-master?q=${encodeURIComponent(code)}`);
+                const list = await r.json();
+                const exact = list.find(a => a.account_code === code);
+                nameDisp.textContent = exact ? exact.account_name : '';
+            } catch { nameDisp.textContent = ''; }
+        }
+
+        // ドロップダウン表示
+        async function showDropdown(q) {
+            if (!q) { dropdown.style.display = 'none'; return; }
+            try {
+                const r = await fetch(`/api/master/account-master?q=${encodeURIComponent(q)}`);
+                const list = await r.json();
+                currentItems = list;
+                highlightIdx = -1;
+                if (list.length === 0) {
+                    dropdown.innerHTML = `<div class="account-dropdown-empty">「${escapeHtml(q)}」に一致する科目なし</div>`;
+                } else {
+                    dropdown.innerHTML = list.map((a, i) => `
+                        <div class="account-dropdown-item" data-idx="${i}">
+                            <span class="ac-code">${escapeHtml(a.account_code)}</span>
+                            <span class="ac-name">${escapeHtml(a.account_name)}</span>
+                        </div>`).join('');
+                    // クリックで選択
+                    dropdown.querySelectorAll('.account-dropdown-item').forEach(el => {
+                        el.addEventListener('mousedown', (e) => {
+                            e.preventDefault();
+                            const idx = parseInt(el.dataset.idx);
+                            selectItem(currentItems[idx]);
+                        });
+                    });
+                }
+                dropdown.style.display = 'block';
+            } catch(e) { dropdown.style.display = 'none'; }
+        }
+
+        function selectItem(item) {
+            input.value = item.account_code;
+            if (nameDisp) nameDisp.textContent = item.account_name;
+            dropdown.style.display = 'none';
+        }
+
+        // 入力時リアルタイム検索（デバウンス150ms）
+        let timer;
+        input.addEventListener('input', () => {
+            clearTimeout(timer);
+            timer = setTimeout(() => showDropdown(input.value.trim()), 150);
+        });
+
+        // 🔍ボタン押下
+        if (btn) {
+            btn.addEventListener('click', () => {
+                const q = input.value.trim() || '';
+                showDropdown(q || ' ');  // 空なら全件
+                input.focus();
+            });
+        }
+
+        // キーボード操作
+        input.addEventListener('keydown', (e) => {
+            if (dropdown.style.display === 'none') return;
+            const items = dropdown.querySelectorAll('.account-dropdown-item');
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                highlightIdx = Math.min(highlightIdx + 1, items.length - 1);
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                highlightIdx = Math.max(highlightIdx - 1, 0);
+            } else if (e.key === 'Enter' && highlightIdx >= 0) {
+                e.preventDefault();
+                selectItem(currentItems[highlightIdx]);
+                return;
+            } else if (e.key === 'Escape') {
+                dropdown.style.display = 'none';
+                return;
+            }
+            items.forEach((el, i) => el.classList.toggle('active', i === highlightIdx));
+            if (highlightIdx >= 0) items[highlightIdx].scrollIntoView({ block: 'nearest' });
+        });
+
+        // フォーカスアウトで閉じる
+        input.addEventListener('blur', () => {
+            setTimeout(() => { dropdown.style.display = 'none'; }, 200);
+            resolveAccountName(input.value.trim());
+        });
+
+        // 外部からコードをセットされたとき名前を解決
+        const origDescriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+        input._resolveOnSet = resolveAccountName;
+    }
+
+    // COST科目・SGA科目に検索機能を設定
+    setupAccountSearch('editCostAccount', 'btnSearchCostAccount', 'costAccountDropdown', 'costAccountName');
+    setupAccountSearch('editSgaAccount',  'btnSearchSgaAccount',  'sgaAccountDropdown',  'sgaAccountName');
+
     // Save COST/SGA Accounts
     const btnSaveAccounts = document.getElementById('btnSaveAccounts');
     if (btnSaveAccounts) {
@@ -892,7 +1004,7 @@ document.addEventListener('DOMContentLoaded', () => {
             try {
                 // COSTを保存
                 if (costVal) {
-                    await fetch("/api/rules/account", {
+                    const r1 = await fetch("/api/rules/account", {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({
@@ -904,10 +1016,11 @@ document.addEventListener('DOMContentLoaded', () => {
                             updated_by: "user"
                         })
                     });
+                    if (!r1.ok) { const e = await r1.json().catch(() => ({})); throw new Error("COST保存失敗: " + (e.detail || r1.status)); }
                 }
                 // SGAを保存
                 if (sgaVal) {
-                    await fetch("/api/rules/account", {
+                    const r2 = await fetch("/api/rules/account", {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({
@@ -919,9 +1032,10 @@ document.addEventListener('DOMContentLoaded', () => {
                             updated_by: "user"
                         })
                     });
+                    if (!r2.ok) { const e = await r2.json().catch(() => ({})); throw new Error("SGA保存失敗: " + (e.detail || r2.status)); }
                 }
 
-                showSuccess("科目ルールを保存しました");
+                showSuccess(`[${vCode}] 科目ルールを保存しました`);
                 // 一覧を更新
                 const searchInput = document.getElementById('ruleSearch');
                 const query = searchInput ? searchInput.value : "";
@@ -1205,8 +1319,20 @@ document.addEventListener('DOMContentLoaded', () => {
             const res = await fetch('/api/assignment/dept');
             if (!res.ok) throw new Error("Failed to load");
             const list = await res.json();
-            renderAssignmentDept(list);
             window._deptList = list; // Cache for search
+
+            // 検索フィルターが入力済みの場合はフィルター後のリストで描画（フィルター保持）
+            const currentQ = searchAssignDept ? searchAssignDept.value.trim().toLowerCase() : '';
+            if (currentQ) {
+                const filtered = list.filter(item =>
+                    (item.dept_code && item.dept_code.toLowerCase().includes(currentQ)) ||
+                    (item.dept_name && item.dept_name.toLowerCase().includes(currentQ)) ||
+                    (item.assignee && item.assignee.toLowerCase().includes(currentQ))
+                );
+                renderAssignmentDept(filtered);
+            } else {
+                renderAssignmentDept(list);
+            }
         } catch (e) {
             assignDeptBody.innerHTML = `<tr><td colspan="3" class="error">${e.message}</td></tr>`;
         }
@@ -1236,8 +1362,20 @@ document.addEventListener('DOMContentLoaded', () => {
             const res = await fetch('/api/assignment/vendor');
             if (!res.ok) throw new Error("Failed to load");
             const list = await res.json();
-            renderAssignmentVendor(list);
             window._vendorList = list;
+
+            // 検索フィルターが入力済みの場合はフィルター後のリストで描画（フィルター保持）
+            const currentQ = searchAssignVendor ? searchAssignVendor.value.trim().toLowerCase() : '';
+            if (currentQ) {
+                const filtered = list.filter(item =>
+                    (item.vendor_code && item.vendor_code.toLowerCase().includes(currentQ)) ||
+                    (item.vendor_name && item.vendor_name.toLowerCase().includes(currentQ)) ||
+                    (item.assignee && item.assignee.toLowerCase().includes(currentQ))
+                );
+                renderAssignmentVendor(filtered);
+            } else {
+                renderAssignmentVendor(list);
+            }
         } catch (e) {
             assignVendorBody.innerHTML = `<tr><td colspan="3" class="error">${e.message}</td></tr>`;
         }
@@ -1334,58 +1472,85 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // --- Excluded Vendor Handling ---
-    const newExcludeCode = document.getElementById('newExcludeCode');
-    const newExcludeReason = document.getElementById('newExcludeReason');
-    const btnAddExclude = document.getElementById('btnAddExclude');
-    const excludeListBody = document.getElementById('excludeListBody');
+    // --- 除外取引先管理 (モーダル版) ---
+    const excludeVendorDialog       = document.getElementById('excludeVendorDialog');
+    const btnExcludeVendorManage    = document.getElementById('btnExcludeVendorManage');
+    const btnCloseExcludeVendorDialog = document.getElementById('btnCloseExcludeVendorDialog');
+    const newExcludeCode            = document.getElementById('newExcludeCode');
+    const newExcludeReason          = document.getElementById('newExcludeReason');
+    const btnAddExclude             = document.getElementById('btnAddExclude');
+    const excludeVendorList         = document.getElementById('excludeVendorList');
 
-    // タブ切り替え時にデータロード
+    // ダイアログを開く
+    if (btnExcludeVendorManage) {
+        btnExcludeVendorManage.addEventListener('click', () => {
+            if (excludeVendorDialog) {
+                excludeVendorDialog.style.display = 'block';
+                loadExcludedVendors();
+            }
+        });
+    }
+
+    // ダイアログを閉じる
+    if (btnCloseExcludeVendorDialog) {
+        btnCloseExcludeVendorDialog.addEventListener('click', () => {
+            if (excludeVendorDialog) excludeVendorDialog.style.display = 'none';
+        });
+    }
+
+    // タブ切り替え時（担当割当）はロードのみ（表示はモーダル経由に変更）
     document.querySelectorAll('.tab-btn[data-target="assignment"]').forEach(btn => {
         btn.addEventListener('click', () => {
             loadAssignmentDept();
             loadAssignmentVendor();
-            loadExcludedVendors();
         });
     });
 
     async function loadExcludedVendors() {
-        if (!excludeListBody) return;
-        excludeListBody.innerHTML = '<tr><td colspan="3" class="loading">Loading...</td></tr>';
+        if (!excludeVendorList) return;
+        excludeVendorList.innerHTML = '<em style="color:#888;">読込中...</em>';
         try {
             const res = await fetch('/api/exclude');
             if (!res.ok) throw new Error("Load Failed");
             const list = await res.json();
             renderExcludedVendors(list);
         } catch (e) {
-            excludeListBody.innerHTML = `<tr><td colspan="3" class="error">${e.message}</td></tr>`;
+            excludeVendorList.innerHTML = `<div style="color:red;">${e.message}</div>`;
         }
     }
 
     function renderExcludedVendors(list) {
         if (list.length === 0) {
-            excludeListBody.innerHTML = '<tr><td colspan="3" class="muted">登録なし</td></tr>';
+            excludeVendorList.innerHTML = '<div style="color:var(--muted);padding:8px;">登録なし</div>';
             return;
         }
-        excludeListBody.innerHTML = list.map(item => `
-            <tr>
-                <td>${escapeHtml(item.vendor_code)}</td>
-                <td>${escapeHtml(item.reason || '')}</td>
-                <td>
-                    <button class="danger xs" onclick="deleteExclude('${item.vendor_code}')">削除</button>
-                </td>
-            </tr>
-        `).join('');
+        excludeVendorList.innerHTML = `
+            <table style="width:100%;border-collapse:collapse;font-size:13px;">
+              <thead>
+                <tr style="color:var(--muted);">
+                  <th style="padding:4px 8px;text-align:left;width:30%">取引先コード</th>
+                  <th style="padding:4px 8px;text-align:left;">理由</th>
+                  <th style="padding:4px 8px;width:50px;"></th>
+                </tr>
+              </thead>
+              <tbody>
+                ${list.map(item => `
+                  <tr style="border-top:1px solid rgba(255,255,255,0.07);">
+                    <td style="padding:5px 8px;">${escapeHtml(item.vendor_code)}</td>
+                    <td style="padding:5px 8px;">${escapeHtml(item.reason || '')}</td>
+                    <td style="padding:5px 8px;">
+                      <button class="danger xs" onclick="deleteExclude('${item.vendor_code}')">削除</button>
+                    </td>
+                  </tr>`).join('')}
+              </tbody>
+            </table>`;
     }
 
     if (btnAddExclude) {
         btnAddExclude.addEventListener('click', async () => {
             const code = newExcludeCode.value.trim();
             const reason = newExcludeReason.value.trim();
-            if (!code) {
-                showError("取引先コードを入力してください");
-                return;
-            }
+            if (!code) { showError("取引先コードを入力してください"); return; }
 
             btnAddExclude.disabled = true;
             try {
@@ -1408,7 +1573,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // Global delete function
+    // グローバル削除関数
     window.deleteExclude = async (code) => {
         if (!confirm(`取引先コード ${code} を除外リストから削除しますか？`)) return;
         try {
@@ -1864,9 +2029,9 @@ if (btnAddTaxRule) {
 
 // --- OCR Logic ---
 const btnRunOCR = document.getElementById('btnRunOCR');
+const btnRunOCRFast = document.getElementById('btnRunOCRFast');
 const btnRefreshOCR = document.getElementById('btnRefreshOCR');
 const btnExportExcel = document.getElementById('btnExportExcel');
-const ocrFilterNG = document.getElementById('ocrFilterNG');
 const ocrListBody = document.getElementById('ocrListBody');
 const ocrStatusMsg = document.getElementById('ocrStatusMsg');
 
@@ -1877,15 +2042,10 @@ const ocrPdfFrame = document.getElementById('ocrPdfFrame');
 
 // Detail Elements
 const detailApprovalNo = document.getElementById('detailApprovalNo');
+const detailVendorName = document.getElementById('detailVendorName');
+const detailStatus = document.getElementById('detailStatus');
 const detailFileName = document.getElementById('detailFileName');
-const detailConfidence = document.getElementById('detailConfidence');
-const detailMethod = document.getElementById('detailMethod');
-const detailPaymentAmount = document.getElementById('detailPaymentAmount');
-const detailDetectedAmount = document.getElementById('detailDetectedAmount');
-const detailDiff = document.getElementById('detailDiff');
-const detailMessage = document.getElementById('detailMessage');
-const detailInvoiceNo = document.getElementById('detailInvoiceNo');
-const detailReducedTax = document.getElementById('detailReducedTax');
+const detailHasRingi = document.getElementById('detailHasRingi');
 
 // Run OCR
 // Run OCR
@@ -1909,12 +2069,14 @@ function startOCRPolling() {
                     clearInterval(ocrPollTimer);
                     ocrStatusMsg.innerHTML = `<span style="color:var(--success); font-weight:bold;">✓ ${prog.message}</span>`; // messageには既に時間が含まれている
                     btnRunOCR.disabled = false;
+                    if (btnRunOCRFast) btnRunOCRFast.disabled = false;
                     // 結果を自動更新
                     loadOCRResults();
                 } else if (prog.status === 'error') {
                     clearInterval(ocrPollTimer);
                     ocrStatusMsg.innerHTML = `<span style="color:var(--error); font-weight:bold;">✗ ${prog.message}</span>`;
                     btnRunOCR.disabled = false;
+                    if (btnRunOCRFast) btnRunOCRFast.disabled = false;
                 } else if (prog.status === 'running') {
                     // Runningの場合は独自メッセージを組み立てていたので、時間を追加
                     ocrStatusMsg.innerHTML = `<span style="color:var(--accent); font-weight:bold;">Running... ${prog.processed}/${prog.total} files${timeInfo}</span>`;
@@ -1929,37 +2091,49 @@ function startOCRPolling() {
             clearInterval(ocrPollTimer);
             ocrStatusMsg.textContent = 'Running... (Auto-refresh stopped)';
             btnRunOCR.disabled = false;
+            if (btnRunOCRFast) btnRunOCRFast.disabled = false;
         }
     };
     pollTask();
     ocrPollTimer = setInterval(pollTask, 3000);
 }
 
+async function runOCR(fast) {
+    const confirmMsg = fast
+        ? '高速解析を実行しますか？（傾き補正なし）'
+        : '請求書ファイルの一覧を取得しますか？';
+    if (!confirm(confirmMsg)) return;
+
+    btnRunOCR.disabled = true;
+    if (btnRunOCRFast) btnRunOCRFast.disabled = true;
+    ocrStatusMsg.textContent = fast ? 'Starting fast analysis...' : 'Starting analysis...';
+
+    // 即座にポーリング開始
+    startOCRPolling();
+
+    try {
+        const url = fast ? '/api/ocr/analyze?fast=true' : '/api/ocr/analyze';
+        const res = await fetch(url, { method: 'POST' });
+        if (!res.ok) throw new Error((await res.json()).detail);
+
+        showSuccess(fast ? '高速OCR解析を開始しました' : 'ファイルスキャンを開始しました');
+        // ポーリングは継続
+
+    } catch (e) {
+        showError('実行エラー: ' + e.message);
+        ocrStatusMsg.textContent = 'エラーが発生しました: ' + e.message;
+        if (ocrPollTimer) clearInterval(ocrPollTimer);
+        btnRunOCR.disabled = false;
+        if (btnRunOCRFast) btnRunOCRFast.disabled = false;
+    }
+}
+
 if (btnRunOCR) {
-    btnRunOCR.addEventListener('click', async () => {
-        if (!confirm('OCR解析を実行しますか？（数分かかる場合があります）')) return;
+    btnRunOCR.addEventListener('click', () => runOCR(false));
+}
 
-        btnRunOCR.disabled = true;
-        ocrStatusMsg.textContent = 'Starting analysis...';
-
-        // 即座にポーリング開始
-        startOCRPolling();
-
-        try {
-            const res = await fetch('/api/ocr/analyze', { method: 'POST' });
-            if (!res.ok) throw new Error((await res.json()).detail);
-
-            showSuccess('OCR解析を開始しました');
-            // ポーリングは継続
-
-        } catch (e) {
-            showError('実行エラー: ' + e.message);
-            ocrStatusMsg.textContent = 'エラーが発生しました: ' + e.message;
-            if (ocrPollTimer) clearInterval(ocrPollTimer);
-        } finally {
-            btnRunOCR.disabled = false;
-        }
-    });
+if (btnRunOCRFast) {
+    btnRunOCRFast.addEventListener('click', () => runOCR(true));
 }
 
 if (btnExportExcel) {
@@ -1986,7 +2160,7 @@ const ocrEscapeHtml = (str) => {
 async function loadOCRResults() {
     if (!ocrListBody) return;
 
-    ocrListBody.innerHTML = '<tr><td colspan="8" class="loading">Loading...</td></tr>';
+    ocrListBody.innerHTML = '<tr><td colspan="4" class="loading">Loading...</td></tr>';
 
     try {
         const res = await fetch('/api/ocr/results');
@@ -1996,55 +2170,35 @@ async function loadOCRResults() {
         ocrListBody.innerHTML = '';
 
         if (data.length === 0) {
-            ocrListBody.innerHTML = '<tr><td colspan="8" style="text-align:center">データがありません</td></tr>';
+            ocrListBody.innerHTML = '<tr><td colspan="4" style="text-align:center">データがありません</td></tr>';
             return;
         }
 
-        let count = 0;
         data.forEach(item => {
-            // Filter Logic: NGチェックありなら OK 以外を表示
-            if (ocrFilterNG && ocrFilterNG.checked && item.match_status === 'OK') return;
-
-            count++;
             const tr = document.createElement('tr');
-
-            // Status Badge
-            let statusClass = 'badge dash';
-            if (item.match_status === 'OK') statusClass = 'badge ok';
-            else if (item.match_status === 'NG') statusClass = 'badge ng';
-            else if (item.match_status === 'WARNING') statusClass = 'badge warn';
-
-            // Diff style
-            let diffStyle = '';
-            if (item.amount_diff !== 0 && item.amount_diff != null) diffStyle = 'color:var(--ng); font-weight:bold;';
-
+            const ringiLabel = item.has_ringi ? ' <span class="badge warn" style="font-size:0.7em">稟議</span>' : '';
             tr.innerHTML = `
-                    <td><span class="${statusClass}">${item.match_status}</span></td>
-                    <td>${item.approval_no}</td>
-                    <td>${ocrEscapeHtml(item.vendor_name || '-')}</td>
-                    <td style="text-align:right">${(item.payment_amount || 0).toLocaleString()}</td>
-                    <td style="text-align:right">${(item.detected_amount || 0).toLocaleString()}</td>
-                    <td style="text-align:right; ${diffStyle}">${(item.amount_diff || 0).toLocaleString()}</td>
-                    <td style="font-size:0.8em; max-width:150px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${ocrEscapeHtml(item.file_name)}</td>
-                    <td><button class="secondary sm btn-detail">詳細</button></td>
-                `;
-
-            // Detail Button Event (Closure for item access)
-            const btnDetail = tr.querySelector('.btn-detail');
-            btnDetail.onclick = () => showOCRDetail(item);
-
+                <td style="font-size:0.85em">${ocrEscapeHtml(item.approval_no || '-')}</td>
+                <td>${ocrEscapeHtml(item.vendor_name || '-')}</td>
+                <td><span class="badge dash" style="font-size:0.8em">${ocrEscapeHtml(item.status || '-')}</span></td>
+                <td style="font-size:0.8em">
+                    <a href="#" class="file-link" style="color:var(--accent); text-decoration:underline; cursor:pointer; word-break:break-all;">
+                        ${ocrEscapeHtml(item.file_name || '-')}
+                    </a>${ringiLabel}
+                </td>
+            `;
+            tr.querySelector('.file-link').addEventListener('click', (e) => {
+                e.preventDefault();
+                showOCRDetail(item);
+            });
             ocrListBody.appendChild(tr);
         });
 
-        if (count === 0) {
-            ocrListBody.innerHTML = '<tr><td colspan="8" style="text-align:center">該当するデータはありません</td></tr>';
-        }
-
-        if (ocrStatusMsg) ocrStatusMsg.textContent = `表示: ${count}件 (全${data.length}件)`;
+        if (ocrStatusMsg) ocrStatusMsg.textContent = `${data.length}件`;
 
     } catch (e) {
         console.error(e);
-        ocrListBody.innerHTML = `<tr><td colspan="8" class="error">読み込みエラー: ${e.message}</td></tr>`;
+        ocrListBody.innerHTML = `<tr><td colspan="4" class="error">読み込みエラー: ${e.message}</td></tr>`;
     }
 }
 
@@ -2052,35 +2206,18 @@ if (btnRefreshOCR) {
     btnRefreshOCR.addEventListener('click', loadOCRResults);
 }
 
-if (ocrFilterNG) {
-    ocrFilterNG.addEventListener('change', loadOCRResults);
-}
-
 // Modal Logic
 function showOCRDetail(item) {
     if (!ocrPreviewModal) return;
 
-    // Data Set
-    if (detailApprovalNo) detailApprovalNo.textContent = item.approval_no;
-    if (detailFileName) detailFileName.textContent = item.file_name;
-    if (detailConfidence) detailConfidence.textContent = item.confidence ? (item.confidence * 100).toFixed(1) + '%' : '-';
-    if (detailMethod) detailMethod.textContent = item.ocr_method || '-';
+    if (detailApprovalNo) detailApprovalNo.textContent = item.approval_no || '-';
+    if (detailVendorName) detailVendorName.textContent = item.vendor_name || '-';
+    if (detailStatus) detailStatus.textContent = item.status || '-';
+    if (detailFileName) detailFileName.textContent = item.file_name || '-';
+    if (detailHasRingi) detailHasRingi.textContent = item.has_ringi ? 'あり' : 'なし';
 
-    if (detailPaymentAmount) detailPaymentAmount.textContent = (item.payment_amount || 0).toLocaleString();
-    if (detailDetectedAmount) detailDetectedAmount.textContent = (item.detected_amount || 0).toLocaleString();
-    if (detailDiff) {
-        detailDiff.textContent = (item.amount_diff || 0).toLocaleString();
-        if (item.amount_diff !== 0) detailDiff.style.color = 'var(--ng)';
-        else detailDiff.style.color = 'inherit';
-    }
-
-    if (detailInvoiceNo) detailInvoiceNo.textContent = item.detected_invoice_no || '-';
-    if (detailReducedTax) detailReducedTax.textContent = item.has_reduced_tax ? 'あり' : 'なし';
-
-    // Show Modal
     ocrPreviewModal.style.display = 'block';
 
-    // Load PDF
     if (ocrPdfFrame) ocrPdfFrame.src = `/api/ocr/files/${encodeURIComponent(item.file_name)}`;
 }
 
@@ -2475,4 +2612,219 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         });
     }
+
+    const btnClearDriveCache = document.getElementById('btnClearDriveCache');
+    const driveCacheStatus = document.getElementById('driveCacheStatus');
+    if (btnClearDriveCache) {
+        btnClearDriveCache.addEventListener('click', async () => {
+            if (!confirm("Driveアップロード履歴（キャッシュ）をクリアしますか？\n※Drive側のファイルは削除されません。手動で削除してから実行してください。")) return;
+
+            btnClearDriveCache.disabled = true;
+            if (driveCacheStatus) driveCacheStatus.textContent = "クリア中...";
+            try {
+                const res = await fetch('/api/settings/clear-drive-cache', { method: 'POST' });
+                if (!res.ok) throw new Error(await res.text());
+                const json = await res.json();
+                if (driveCacheStatus) {
+                    driveCacheStatus.textContent = `✓ ${json.message}`;
+                    driveCacheStatus.style.color = 'var(--success)';
+                }
+                alert(json.message);
+            } catch (e) {
+                if (driveCacheStatus) {
+                    driveCacheStatus.textContent = `✗ エラー: ${e.message}`;
+                    driveCacheStatus.style.color = 'var(--error)';
+                }
+                alert("クリアエラー: " + e.message);
+            } finally {
+                btnClearDriveCache.disabled = false;
+            }
+        });
+    }
 });
+
+
+// ============================================================
+// 取引先注意事項 (Vendor Notes)
+// ============================================================
+document.addEventListener('DOMContentLoaded', () => {
+    const _esc = (str) => {
+        if (!str) return '';
+        return String(str).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
+    };
+
+    const noteSelect         = document.getElementById('noteSelect');
+    const btnAddVendorNote   = document.getElementById('btnAddVendorNote');
+    const btnCreateNoteLabel = document.getElementById('btnCreateNoteLabel');
+    const newNoteLabel       = document.getElementById('newNoteLabel');
+    const vendorNoteChips    = document.getElementById('vendorNoteChips');
+    const noteLabelList      = document.getElementById('noteLabelList');
+
+    if (!noteSelect) return;  // 正マスタータブが存在しない場合はスキップ
+
+    // ---- ラベル一覧を select と ラベルマスタ欄に反映 ----
+    async function loadNoteLabels() {
+        try {
+            const res = await fetch('/api/master/note-labels');
+            if (!res.ok) return;
+            const labels = await res.json();
+
+            // セレクト更新
+            noteSelect.innerHTML = '<option value="">-- ラベルを選択 --</option>';
+            labels.forEach(l => {
+                const opt = document.createElement('option');
+                opt.value = l.id;
+                opt.textContent = l.label;
+                noteSelect.appendChild(opt);
+            });
+
+            // ラベルマスタ欄更新（常時表示・×で削除可）
+            if (noteLabelList) {
+                noteLabelList.innerHTML = '';
+                if (labels.length === 0) {
+                    noteLabelList.innerHTML = '<span style="color:var(--muted);font-size:0.85em;">ラベルなし</span>';
+                } else {
+                    labels.forEach(l => {
+                        const chip = document.createElement('span');
+                        chip.className = 'note-chip';
+                        chip.innerHTML = `${_esc(l.label)} <button class="chip-del" onclick="deleteNoteLabel(${l.id})" title="削除">×</button>`;
+                        noteLabelList.appendChild(chip);
+                    });
+                }
+            }
+        } catch (e) {
+            console.error('loadNoteLabels error:', e);
+        }
+    }
+
+    // ---- 取引先のノートを表示 ----
+    window.loadVendorNotes = async function(vendorCode) {
+        if (!vendorNoteChips || !vendorCode || vendorCode === '-') {
+            if (vendorNoteChips) vendorNoteChips.innerHTML = '<span style="color:var(--muted);font-size:0.85em;">取引先を選択してください</span>';
+            return;
+        }
+        try {
+            const res = await fetch(`/api/master/vendor-notes/${encodeURIComponent(vendorCode)}`);
+            if (!res.ok) return;
+            const notes = await res.json();
+            vendorNoteChips.innerHTML = '';
+            if (notes.length === 0) {
+                vendorNoteChips.innerHTML = '<span style="color:var(--muted);font-size:0.85em;">注意事項なし</span>';
+            } else {
+                notes.forEach(n => {
+                    const chip = document.createElement('span');
+                    chip.className = 'note-chip active';
+                    chip.innerHTML = `${_esc(n.label)} <button class="chip-del" onclick="removeVendorNote(${n.id},'${_esc(vendorCode)}')" title="削除">×</button>`;
+                    vendorNoteChips.appendChild(chip);
+                });
+            }
+        } catch (e) {
+            console.error('loadVendorNotes error:', e);
+        }
+    };
+
+    // ---- 取引先にラベルを追加 ----
+    if (btnAddVendorNote) {
+        btnAddVendorNote.addEventListener('click', async () => {
+            const vCode = document.getElementById('detailVendorCode')?.textContent?.trim();
+            if (!vCode || vCode === '-') { alert('取引先を選択してください'); return; }
+            const labelId = parseInt(noteSelect.value);
+            if (!labelId) { alert('ラベルを選択してください'); return; }
+            try {
+                const res = await fetch('/api/master/vendor-notes', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ vendor_code: vCode, label_id: labelId })
+                });
+                if (!res.ok) {
+                    const err = await res.json();
+                    alert(err.detail || 'エラーが発生しました');
+                    return;
+                }
+                noteSelect.value = '';
+                window.loadVendorNotes(vCode);
+            } catch (e) { alert('追加エラー: ' + e.message); }
+        });
+    }
+
+    // ---- 新規ラベル作成 ----
+    if (btnCreateNoteLabel) {
+        btnCreateNoteLabel.addEventListener('click', async () => {
+            const label = newNoteLabel?.value?.trim();
+            if (!label) { alert('ラベル名を入力してください'); return; }
+            try {
+                const res = await fetch('/api/master/note-labels', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ label })
+                });
+                if (!res.ok) {
+                    const err = await res.json();
+                    alert(err.detail || 'エラーが発生しました');
+                    return;
+                }
+                newNoteLabel.value = '';
+                await loadNoteLabels();
+                // 作成したラベルをすぐ選択状態にする
+                for (const opt of noteSelect.options) {
+                    if (opt.textContent === label) { noteSelect.value = opt.value; break; }
+                }
+            } catch (e) { alert('作成エラー: ' + e.message); }
+        });
+    }
+
+    // 初期ロード
+    loadNoteLabels();
+});
+
+// ---- ラベル削除 (グローバル) ----
+window.deleteNoteLabel = async function(labelId) {
+    if (!confirm('このラベルを削除しますか？\n取引先への紐付きもすべて削除されます。')) return;
+    try {
+        const res = await fetch(`/api/master/note-labels/${labelId}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error(await res.text());
+
+        // セレクト＆ラベルマスタ欄を再読込
+        const res2 = await fetch('/api/master/note-labels');
+        const labels = await res2.json();
+        const noteSelect = document.getElementById('noteSelect');
+        const noteLabelList = document.getElementById('noteLabelList');
+
+        if (noteSelect) {
+            noteSelect.innerHTML = '<option value="">-- ラベルを選択 --</option>';
+            labels.forEach(l => {
+                const opt = document.createElement('option');
+                opt.value = l.id;
+                opt.textContent = l.label;
+                noteSelect.appendChild(opt);
+            });
+        }
+        if (noteLabelList) {
+            noteLabelList.innerHTML = '';
+            if (labels.length === 0) {
+                noteLabelList.innerHTML = '<span style="color:var(--muted);font-size:0.85em;">ラベルなし</span>';
+            } else {
+                labels.forEach(l => {
+                    const chip = document.createElement('span');
+                    chip.className = 'note-chip';
+                    chip.innerHTML = `${l.label} <button class="chip-del" onclick="deleteNoteLabel(${l.id})" title="削除">×</button>`;
+                    noteLabelList.appendChild(chip);
+                });
+            }
+        }
+
+        // 現在選択中の取引先ノートも更新
+        const vCode = document.getElementById('detailVendorCode')?.textContent?.trim();
+        if (vCode && vCode !== '-') window.loadVendorNotes(vCode);
+
+    } catch (e) { alert('削除エラー: ' + e.message); }
+};
+
+// ---- 取引先ノート削除 (グローバル) ----
+window.removeVendorNote = async function(noteId, vendorCode) {
+    try {
+        const res = await fetch(`/api/master/vendor-notes/${noteId}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error(await res.text());
+        window.loadVendorNotes(vendorCode);
+    } catch (e) { alert('削除エラー: ' + e.message); }
+};

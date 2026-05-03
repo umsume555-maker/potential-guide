@@ -27,6 +27,7 @@ google-generativeai==0.8.6
 # --- PDF処理 ---
 pdfplumber==0.11.9
 Pillow==12.1.1
+pypdf==6.10.2
 
 # --- HTTP クライアント ---
 httpx==0.28.1

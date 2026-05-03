@@ -29,9 +29,12 @@ class InvoiceMatchService:
             pass
         return None
 
-    async def process_and_match(self, run_id: str, zip_out_path: Path) -> dict:
+    async def process_and_match(self, run_id: str, zip_out_path: Path, fast: bool = False) -> dict:
         """
         ZIP展開後のフォルダをスキャンし、OCR実行・突合を行う
+
+        Args:
+            fast: Trueの場合、Geminiによる傾き補正をスキップして高速化
         """
         self.logger.info(f"Starting OCR matching for RunID: {run_id}")
         
@@ -81,29 +84,50 @@ class InvoiceMatchService:
             
             # ファイルを請求書と稟議書に分類
             invoice_files = []
-            has_ringi = False
-            
+            ringi_files = []
+
             for file_path in folder.files:
                 if self._is_ringi_file(file_path):
-                    has_ringi = True
+                    ringi_files.append(file_path)
                 else:
                     invoice_files.append(file_path)
-            
+
+            has_ringi = len(ringi_files) > 0
+
             # 請求書ファイルがない場合はスキップ
             if not invoice_files:
                 self.logger.warning(f"No invoice files found in {folder_approval_no}")
                 continue
-            
-            # 複数の請求書がある場合、ファイルサイズが最大のものを選択
+
+            # OCR対象: 複数の請求書がある場合はファイルサイズが最大のものを使用
             if len(invoice_files) > 1:
-                largest_file = max(invoice_files, key=lambda f: f.stat().st_size)
-                invoice_files = [largest_file]
-                self.logger.info(f"Multiple invoices found for {folder_approval_no}, using largest: {largest_file.name}")
-            
-            # 請求書ファイルをOCR処理（1ファイルのみ）
-            file_path = invoice_files[0]
+                ocr_target = max(invoice_files, key=lambda f: f.stat().st_size)
+                self.logger.info(f"Multiple invoices found for {folder_approval_no}, OCR-ing largest: {ocr_target.name}")
+            else:
+                ocr_target = invoice_files[0]
+
+            # 請求書ファイルをOCR処理（金額検出用は最大ファイル）
+            file_path = ocr_target
             ocr_result = self._perform_ocr(file_path, force_model=force_model)
             extracted = extract_all(ocr_result.text)
+
+            # PDF正立化（ハイブリッド版）: Geminiで向き判定 → /Rotate を書き戻す
+            # テキストPDFでもコンテンツが傾いて描画されている場合があるため全PDFを対象とする
+            # fast=True の場合は回転補正自体をスキップ（高速化）
+            if not fast and file_path.suffix.lower() == ".pdf":
+                try:
+                    from invoice_ocr.pdf_tools import normalize_pdf_rotation_via_gemini
+                    api_key = get_gemini_api_key(self.db_path)
+                    if api_key:
+                        rot_model = (
+                            self.config.get("ai_ocr", {}).get("model", "gemini-2.0-flash")
+                            if self.config else "gemini-2.0-flash"
+                        )
+                        changed = normalize_pdf_rotation_via_gemini(file_path, api_key, rot_model)
+                        if changed:
+                            self.logger.info(f"PDF rotation normalized: {file_path.name} ({changed} pages)")
+                except Exception as e:
+                    self.logger.warning(f"PDF rotation normalize skipped: {file_path.name} - {e}")
             
             # --- AI Structural Extraction (Post-process override) ---
             # Gemini強制フラグがある場合、構造化データ抽出を試みる
@@ -152,8 +176,9 @@ class InvoiceMatchService:
             
             detected_amount = extracted.amount
             
-            # ファイル名（1ファイルのみ）
-            file_names = file_path.name
+            # 全ファイル名を記録（請求書 + 稟議書、カンマ区切り）
+            all_files = invoice_files + ringi_files
+            file_names = ",".join(f.name for f in all_files)
             
             # --- 突合ロジック ---
             candidates = summary_map.get((dept_code, vendor_code), [])

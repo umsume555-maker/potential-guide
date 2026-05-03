@@ -4,6 +4,7 @@
 """
 from typing import Optional
 from dataclasses import dataclass
+from infra.csv_loader import normalize_dept_code
 
 
 @dataclass
@@ -305,8 +306,9 @@ def find_missing_vendors(
         if v_code in excluded_vendors:
             continue
         
-        # 4. 当月データがあるか確認
-        if (v_code, d_code) in current_pairs:
+        # 4. 当月データがあるか確認 (部門コードを8桁正規化して比較)
+        d_code_norm = normalize_dept_code(d_code)
+        if (v_code, d_code_norm) in current_pairs or (v_code, d_code) in current_pairs:
             continue
             
         # 5. 直近4ヶ月データ構築

@@ -95,26 +95,31 @@ class PDFExtractor(BaseExtractor):
         if not keywords:
             keywords = ["事業所", "部門", "店舗", "金額", "請求額", "合計"]
             
+        def normalize_text(s: str) -> str:
+            """改行・タブ・連続スペースを単一スペースに正規化"""
+            import re
+            return re.sub(r'[\s\n\t]+', ' ', str(s)).strip()
+
         # Find header row
         for i, row in enumerate(table):
-            row_text = [str(cell).strip() if cell else "" for cell in row]
-            
+            row_text = [normalize_text(cell) if cell else "" for cell in row]
+
             # Check if this row looks like a header
             d_idx = -1
             a_idx = -1
-            
+
             for col_i, text in enumerate(row_text):
                 # Dept detection
                 if config.pdf_dept_column:
-                    if config.pdf_dept_column in text:
+                    if normalize_text(config.pdf_dept_column) in text:
                         d_idx = col_i
                 else:
                     if any(k in text for k in ["事業所", "部門", "店舗", "店名"]):
                         d_idx = col_i
-                        
+
                 # Amount detection
                 if config.pdf_amount_column:
-                    if config.pdf_amount_column in text:
+                    if normalize_text(config.pdf_amount_column) in text:
                         a_idx = col_i
                 else:
                     if any(k in text for k in ["金額", "請求", "合計", "小計"]):
@@ -135,27 +140,41 @@ class PDFExtractor(BaseExtractor):
                 
                 raw_dept = row[dept_idx]
                 raw_amount = row[amount_idx]
-                
+
                 if not raw_dept or not raw_amount:
                     continue
+
+                # 改行を含む場合（例: "注文No.\n事業所名"）→ 最後の行を事業所名として使用
+                raw_dept_str = str(raw_dept).strip()
+                if "\n" in raw_dept_str:
+                    raw_dept_str = raw_dept_str.split("\n")[-1].strip()
+                else:
+                    raw_dept_str = raw_dept_str
                 
                 # Clean amount
                 try:
                     clean_amt_str = str(raw_amount).replace(",", "").replace("¥", "").strip()
                     # PDF extraction might leave spaces
-                    clean_amt_str = "".join(clean_amt_str.split()) 
+                    clean_amt_str = "".join(clean_amt_str.split())
                     if not clean_amt_str: continue
-                    
+
                     amount_val = float(clean_amt_str)
                     if amount_val.is_integer():
                         amount_val = int(amount_val)
                 except ValueError:
                     continue
 
+                # 0円・合計行はスキップ
+                if amount_val == 0:
+                    continue
+                skip_keywords = ["合計", "小計", "総計", "total", "subtotal"]
+                if any(k in raw_dept_str for k in skip_keywords):
+                    continue
+
                 record = InvoiceRecord(
                     row_index=i + 1, # Relative to table
                     source_file=f"{Path(file_path).name} (Page {page_num+1})",
-                    raw_dept_name=str(raw_dept).strip(),
+                    raw_dept_name=raw_dept_str,
                     raw_amount=amount_val
                 )
                 records.append(record)

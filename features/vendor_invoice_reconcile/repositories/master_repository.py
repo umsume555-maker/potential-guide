@@ -53,23 +53,52 @@ class MasterRepository:
     def get_cumulative_data(self, base_month: str, vendor_codes: List[str]) -> List[dict]:
         """
         指定月・取引先の実績データを取得（集計前）
+        累積テーブルにデータがない場合（月次更新未実施）は、
+        output_summary（チェック実行結果）も参照してMISSING誤検知を防ぐ。
         """
         if not vendor_codes:
             return []
-            
+
         placeholders = ",".join(["?"] * len(vendor_codes))
-        sql = f"""
-            SELECT vendor_code, dept_code, dept_name, payment_amount, transaction_date, base_invoice_no
-            FROM cumulative
-            WHERE yyyymm = ?
-              AND vendor_code IN ({placeholders})
-        """
-        params = [base_month] + vendor_codes
-        
+
         with get_db() as conn:
             conn.row_factory = sqlite3.Row
-            cursor = conn.execute(sql, params)
-            return [dict(row) for row in cursor.fetchall()]
+
+            # 1. 累積テーブルから取得
+            sql_cum = f"""
+                SELECT vendor_code, dept_code, dept_name, payment_amount,
+                       transaction_date, base_invoice_no
+                FROM cumulative
+                WHERE yyyymm = ?
+                  AND vendor_code IN ({placeholders})
+            """
+            cum_rows = [dict(r) for r in conn.execute(sql_cum, [base_month] + vendor_codes).fetchall()]
+
+            # 2. output_summary から当月分を取得（月次更新未実施の当月対応）
+            #    大きなチェック実行run（input_rows >= 100）のみ対象
+            sql_os = f"""
+                SELECT o.vendor_code, o.dept_code, o.dept_name, o.payment_amount,
+                       o.transaction_date, o.base_invoice_no
+                FROM output_summary o
+                JOIN run_log r ON o.run_id = r.run_id
+                WHERE r.base_month = ?
+                  AND o.vendor_code IN ({placeholders})
+                  AND r.input_rows >= 100
+                  AND o.payment_amount > 0
+            """
+            os_rows = [dict(r) for r in conn.execute(sql_os, [base_month] + vendor_codes).fetchall()]
+
+            # 3. 重複排除：base_invoice_no で一意化
+            #    cumulative 優先、次に output_summary（最新run）
+            seen_keys = {r["base_invoice_no"] for r in cum_rows if r.get("base_invoice_no")}
+            os_rows_dedup = []
+            for r in os_rows:
+                key = r.get("base_invoice_no")
+                if key and key not in seen_keys:
+                    seen_keys.add(key)
+                    os_rows_dedup.append(r)
+
+            return cum_rows + os_rows_dedup
 
 
     def get_cumulative_data_all(self, base_month: str, exclude_vendor_codes: List[str] = None) -> List[dict]:

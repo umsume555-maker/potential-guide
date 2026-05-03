@@ -267,6 +267,12 @@ button:disabled {
   background: rgba(247, 201, 72, .12);
 }
 
+.badge.warn {
+  border-color: rgba(255, 160, 40, .40);
+  background: rgba(255, 160, 40, .14);
+  color: #e07800;
+}
+
 .callout {
   border: 1px dashed rgba(255, 255, 255, .20);
   background: rgba(0, 0, 0, .15);
@@ -419,4 +425,87 @@ button:disabled {
 .master-table tr:hover {
   background: rgba(255, 255, 255, 0.03);
   cursor: pointer;
+}
+
+/* ---- 注意事項チップ ---- */
+.note-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 12px;
+  font-size: 0.82em;
+  font-weight: bold;
+  background: rgba(255, 200, 50, 0.15);
+  border: 1px solid rgba(255, 200, 50, 0.4);
+  color: #ffc832;
+  white-space: nowrap;
+}
+
+.note-chip.active {
+  background: rgba(255, 100, 80, 0.18);
+  border-color: rgba(255, 100, 80, 0.5);
+  color: #ff8070;
+}
+
+.note-chip .chip-del {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: inherit;
+  font-size: 1em;
+  padding: 0 2px;
+  line-height: 1;
+  opacity: 0.7;
+}
+.note-chip .chip-del:hover {
+  opacity: 1;
+}
+
+/* ---- 科目検索ドロップダウン ---- */
+.account-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 200;
+  background: var(--panel);
+  border: 1px solid var(--active);
+  border-radius: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+}
+
+.account-dropdown-item {
+  padding: 7px 12px;
+  cursor: pointer;
+  font-size: 0.88em;
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+}
+
+.account-dropdown-item:hover,
+.account-dropdown-item.active {
+  background: rgba(255,255,255,0.08);
+}
+
+.account-dropdown-item .ac-code {
+  color: var(--muted);
+  font-size: 0.9em;
+  white-space: nowrap;
+}
+
+.account-dropdown-item .ac-name {
+  color: var(--text);
+  flex: 1;
+}
+
+.account-dropdown-empty {
+  padding: 10px 12px;
+  color: var(--muted);
+  font-size: 0.85em;
+  text-align: center;
 }

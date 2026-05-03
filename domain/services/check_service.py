@@ -233,7 +233,9 @@ class CheckService:
                 self._load_masters(conn)
                 
                 # OCR結果読み込み (最新)
-                ocr_results = self._load_latest_ocr_results(conn)
+                # ocr_by_decision: target_decision_no -> ocr_row (1対1の主キー)
+                # ocr_by_dv: (dept_code, vendor_code) -> [ocr_row] (フォールバック)
+                ocr_by_decision, ocr_by_dv = self._load_latest_ocr_results(conn, base_month)
                 
                 # 祝日チェック
                 if not self.holidays:
@@ -259,6 +261,9 @@ class CheckService:
                 
                 # ベース伝票単位で集約
                 summaries = aggregate_by_base_invoice(iter(rows))
+
+                # OCR最適割当を事前計算（処理順序依存の貪欲マッチングを排除）
+                ocr_pre_assigned = self._compute_optimal_ocr_assignments(summaries, ocr_by_dv, ocr_by_decision)
                 
                 # Inputデータから統計情報集計（当月・翌月用）
                 # ユーザー指摘により、明細単位ではなく「伝票単位」で集計する
@@ -418,48 +423,26 @@ class CheckService:
                     # --- OCRデータ結合 ---
                     ocr_amount = ""
                     ocr_file_link = ""
-                    
-                    key = (str(summary.dept_code), str(summary.vendor_code))
-                    if key in ocr_results:
-                        candidates = ocr_results[key]
-                        matched_ocr = None
-                        
-                        if len(candidates) == 1:
-                            matched_ocr = candidates[0]
-                        else:
-                            # 複数候補がある場合、金額一致で突合
-                            # Excel上の金額は整数または浮動小数点だが、OCRはデータ型が不明確な場合も。
-                            # ここでは単純比較 (abs差分が小さいもの)
-                            target_amount = summary.payment_amount
-                            best_match = None
-                            min_diff = float('inf')
-                            
-                            for c in candidates:
-                                try:
-                                    det_amt = c["detected_amount"]
-                                    if det_amt is None: continue
-                                    diff = abs(float(det_amt) - float(target_amount))
-                                    if diff < min_diff:
-                                        min_diff = diff
-                                        best_match = c
-                                except Exception:
-                                    continue
-                            
-                            # 差分が0（完全一致）のみ採用、あるいは最も近いものを採用？
-                            # 要望: 「OUTPUTの「支払金額」と請求書突合のエクセルデータの「当月請求額」も突合して結合先を決定してください。」
-                            # 差分0なら採用、そうでなければ...今回は最も近いものを採用しつつ、差分が大きい場合は警告？
-                            # いったん「最も近いもの」を採用する（ただし閾値を設けるべきかも）
-                            if best_match: # and min_diff == 0: # 必要なら厳格化
-                                matched_ocr = best_match
-                        
-                        if matched_ocr:
-                            ocr_amount = matched_ocr["detected_amount"]
-                            fname = matched_ocr["file_name"]
-                            # ハイパーリンク生成
-                            # サーバーのAPIエンドポイントへのリンク、またはファイルパス
-                            # Excel上でクリックして開くには httpリンクが一番扱いやすい
-                            # "http://localhost:8000/api/ocr/files/{fname}"
-                            ocr_file_link = f'=HYPERLINK("http://localhost:8000/api/ocr/files/{fname}", "リンク")'
+                    matched_ocr = None
+
+                    # 1) 主キー: 決裁番号で1対1引き当て
+                    if summary.decision_no:
+                        matched_ocr = ocr_by_decision.get(str(summary.decision_no))
+
+                    # 2) 事前計算済みの最適割当を使用
+                    if matched_ocr is None:
+                        matched_ocr = ocr_pre_assigned.get(inv_no)
+
+                    if matched_ocr:
+                        ocr_amount = matched_ocr["detected_amount"]
+                        # ファイル名がカンマ区切りの場合（複数ファイル）
+                        fnames = [f.strip() for f in matched_ocr["file_name"].split(",") if f.strip()]
+                        if len(fnames) == 1:
+                            ocr_file_link = f'=HYPERLINK("http://localhost:8000/api/ocr/files/{fnames[0]}", "リンク")'
+                        elif len(fnames) > 1:
+                            # __MULTI__形式でURLリストを保存 → spreadsheet_serviceでリッチテキスト化
+                            base = "http://localhost:8000/api/ocr/files/"
+                            ocr_file_link = "__MULTI__" + "|".join(f"{base}{fn}" for fn in fnames)
 
 
                     # サマリ行
@@ -474,6 +457,7 @@ class CheckService:
                         "vendor_payee_result": vp_result,
                         "assignee": assignee,
                         "base_invoice_no": summary.base_invoice_no,
+                        "decision_no": summary.decision_no,
                         "transaction_date": summary.transaction_date,
                         "payee_code": summary.payee_code,
                         "payment_amount": summary.payment_amount,
@@ -743,57 +727,147 @@ class CheckService:
             
         return info
 
-    def _load_latest_ocr_results(self, conn) -> Dict[tuple, List[dict]]:
-        """最新のOCR結果を取得 (key: (dept_code, vendor_code)) => list of ocr rows"""
-        # 最新のOCR run_idを取得 (OCR実行は run_log に記録されている前提)
-        # run_log は現状共通だが、OCR実行かチェック実行かの区分がないかもしれない
-        # OCR実行時は run_id を生成しているので、invoice_ocr_results にある最大の run_id を探す方が確実かもしれないが
-        # ここでは invoice_ocr_results に存在する run_id の中で、run_log の started_at が最新のものを選ぶ
-        
-        # 最新の run_id を特定
-        cursor = conn.execute("""
-            SELECT r.run_id 
-            FROM run_log r
-            JOIN invoice_ocr_results i ON r.run_id = i.run_id
-            ORDER BY r.started_at DESC 
-            LIMIT 1
-        """)
-        row = cursor.fetchone()
-        
+    def _compute_optimal_ocr_assignments(self, summaries: dict, ocr_by_dv: dict, ocr_by_decision: dict) -> dict:
+        """
+        (dept_code, vendor_code) グループごとに金額差分が最小となる最適割当を計算する。
+        処理順序に依存した貪欲マッチングの代替として使用。
+
+        Returns:
+            {inv_no: ocr_row}
+        """
+        from collections import defaultdict
+        assignments = {}
+
+        # decision_no で既にマッチできる inv_no はスキップ
+        matched_decision_nos = set(ocr_by_decision.keys())
+
+        # (dept_code, vendor_code) ごとにグループ化
+        groups = defaultdict(list)
+        for inv_no, summary in summaries.items():
+            if summary.decision_no and str(summary.decision_no) in matched_decision_nos:
+                continue
+            key = (str(summary.dept_code), str(summary.vendor_code))
+            groups[key].append((inv_no, summary))
+
+        for key, summary_list in groups.items():
+            candidates = ocr_by_dv.get(key, [])
+            if not candidates:
+                continue
+
+            inf = float('inf')
+
+            # コストリスト: (cost, summary_idx, candidate_idx)
+            cost_pairs = []
+            for i, (inv_no, summary) in enumerate(summary_list):
+                for j, cand in enumerate(candidates):
+                    det_amt = cand.get('detected_amount')
+                    if det_amt is None:
+                        cost = inf
+                    else:
+                        try:
+                            cost = abs(float(det_amt) - float(summary.payment_amount))
+                        except Exception:
+                            cost = inf
+                    cost_pairs.append((cost, i, j))
+
+            # コスト昇順でソート（同コストは早いインデックス優先）
+            cost_pairs.sort()
+
+            assigned_summ = set()
+            assigned_cand = set()
+
+            for cost, i, j in cost_pairs:
+                if i in assigned_summ or j in assigned_cand:
+                    continue
+                inv_no, _ = summary_list[i]
+                assignments[inv_no] = candidates[j]
+                assigned_summ.add(i)
+                assigned_cand.add(j)
+
+            # まだ割り当てられていないサマリに残り候補を先着順で割り当て
+            remaining_cands = [candidates[j] for j in range(len(candidates)) if j not in assigned_cand]
+            for i, (inv_no, summary) in enumerate(summary_list):
+                if i not in assigned_summ and remaining_cands:
+                    assignments[inv_no] = remaining_cands.pop(0)
+
+        return assignments
+
+    def _load_latest_ocr_results(self, conn, base_month: str = None):
+        """最新のOCR結果を取得
+
+        Args:
+            base_month: 基準月 (YYYY-MM)。指定した場合は同月のOCR結果のみを使用。
+
+        Returns:
+            (by_decision, by_dv) のタプル
+            - by_decision: dict[str(target_decision_no), ocr_row]  (1対1)
+            - by_dv: dict[(dept_code, vendor_code), List[ocr_row]] (フォールバック用)
+        """
+        # 同じ基準月のOCR結果のみ使用（月をまたいだ誤紐付けを防ぐ）
+        if base_month:
+            cursor = conn.execute("""
+                SELECT r.run_id
+                FROM run_log r
+                JOIN invoice_ocr_results i ON r.run_id = i.run_id
+                WHERE r.base_month = ?
+                ORDER BY r.started_at DESC
+                LIMIT 1
+            """, (base_month,))
+            row = cursor.fetchone()
+            if not row:
+                logger.warning(f"[OCR] {base_month} のOCR結果が見つかりません。リンクなしで処理します。")
+                return {}, {}
+        else:
+            # base_month未指定の場合は最新のrun_idを使用（後方互換）
+            cursor = conn.execute("""
+                SELECT r.run_id
+                FROM run_log r
+                JOIN invoice_ocr_results i ON r.run_id = i.run_id
+                ORDER BY r.started_at DESC
+                LIMIT 1
+            """)
+            row = cursor.fetchone()
+
         if not row:
-            # run_logになくても invoice_ocr_results にあればそれを使う（バックアップ策）
             cursor = conn.execute("SELECT DISTINCT run_id FROM invoice_ocr_results ORDER BY run_id DESC LIMIT 1")
             row = cursor.fetchone()
             if not row:
-                return {}
+                return {}, {}
 
         run_id = row[0]
-        
-        # OCR結果取得
-        # 注意: dept_code, vendor_code は空の場合がある
+
         cursor = conn.execute("""
-            SELECT dept_code, vendor_code, detected_amount, file_name, confidence 
-            FROM invoice_ocr_results 
+            SELECT dept_code, vendor_code, target_decision_no,
+                   detected_amount, file_name, confidence
+            FROM invoice_ocr_results
             WHERE run_id = ?
         """, (run_id,))
-        
-        results = {}
+
+        by_decision: Dict[str, dict] = {}
+        by_dv: Dict[tuple, List[dict]] = {}
         for row in cursor:
-            # マッチングキーとなる情報がない場合はスキップ
-            if not row["dept_code"] or not row["vendor_code"]:
-                continue
-                
-            key = (str(row["dept_code"]), str(row["vendor_code"]))
-            if key not in results:
-                results[key] = []
-            
-            results[key].append({
+            ocr_row = {
                 "detected_amount": row["detected_amount"],
                 "file_name": row["file_name"],
-                "confidence": row["confidence"]
-            })
-            
-        return results
+                "confidence": row["confidence"],
+                "target_decision_no": row["target_decision_no"],
+            }
+
+            # 主キー: target_decision_no（invoice_match_serviceで1対1割当済み）
+            tdn = row["target_decision_no"]
+            if tdn:
+                # 同一decision_noに複数OCR行が紐付くことは想定されないが、
+                # 万が一あれば信頼度の高い方を採用
+                existing = by_decision.get(str(tdn))
+                if existing is None or (ocr_row["confidence"] or 0) > (existing["confidence"] or 0):
+                    by_decision[str(tdn)] = ocr_row
+
+            # フォールバック: (dept_code, vendor_code)
+            if row["dept_code"] and row["vendor_code"]:
+                key = (str(row["dept_code"]), str(row["vendor_code"]))
+                by_dv.setdefault(key, []).append(ocr_row)
+
+        return by_decision, by_dv
 
 
 if __name__ == "__main__":

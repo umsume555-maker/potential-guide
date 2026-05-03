@@ -4,6 +4,7 @@ from pathlib import Path
 from oauth2client.service_account import ServiceAccountCredentials
 from typing import List, Dict, Optional
 from datetime import datetime
+from infra.retry_utils import call_with_retry
 
 class SpreadsheetServiceExt:
     """拡張スプレッドシートサービス（突合用）"""
@@ -22,9 +23,10 @@ class SpreadsheetServiceExt:
     def authenticate(self) -> gspread.Client:
         if not self.credentials_path.exists():
             raise FileNotFoundError(f"Credential file not found: {self.credentials_path}")
-        
+
+        # ConnectionError 時は最大3回リトライ
         creds = ServiceAccountCredentials.from_json_keyfile_name(str(self.credentials_path), self.scope)
-        return gspread.authorize(creds)
+        return call_with_retry(gspread.authorize, creds, max_retries=3, delay=5.0)
 
     def sync_site_sheet(self, db_path: str, run_id: str, site_sheet_id: str, site_dept_codes: List[str], overrides: Dict[tuple, str] = None, site_rows: List[Dict] = None, merge_mode: bool = False) -> Dict[str, str]:
         """
@@ -52,9 +54,20 @@ class SpreadsheetServiceExt:
                 site_sheet_id = match.group(1)
 
         try:
-            client = self.authenticate()
-            sh = client.open_by_key(site_sheet_id)
-            sheet = sh.sheet1
+            import time as _t
+            _client = None
+            for _attempt in range(3):
+                try:
+                    _client = self.authenticate()
+                    sh = call_with_retry(_client.open_by_key, site_sheet_id, max_retries=3, delay=5.0)
+                    sheet = sh.sheet1
+                    break
+                except (ConnectionError, ConnectionResetError, OSError) as _ce:
+                    if _attempt < 2:
+                        print(f"[WARN] Ext sheet 接続失敗 (attempt {_attempt+1}/3): {_ce} — 5秒後リトライ...")
+                        _t.sleep(5)
+                    else:
+                        raise
             
             # --- 1. データ取得 & フィルタリング ---
             if site_rows is not None:

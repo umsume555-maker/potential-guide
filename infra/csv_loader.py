@@ -10,6 +10,19 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 
+def normalize_dept_code(code: str) -> str:
+    """部門コードを8桁ゼロ埋めに正規化する。数値のみの場合は先頭をゼロ埋め。"""
+    if not code:
+        return code
+    s = str(code).strip()
+    # ".0" 付き浮動小数点文字列を整数文字列に変換 (例: "3101010.0" → "3101010")
+    if s.endswith(".0") and s[:-2].isdigit():
+        s = s[:-2]
+    if s.isdigit() and len(s) < 8:
+        s = s.zfill(8)
+    return s
+
+
 @dataclass
 class InputRow:
     """入力CSV1行分のデータ"""
@@ -233,7 +246,7 @@ def load_csv(file_path: Path, encoding: str = "cp932") -> Iterator[InputRow]:
                 base_invoice_no=base_invoice_no,
                 decision_no=row.get("決裁番号", "").strip(),
                 branch_no=branch_no,
-                dept_code=row.get("申請部門表示コード", "").strip(),
+                dept_code=normalize_dept_code(row.get("申請部門表示コード", "").strip()),
                 dept_name=row.get("申請部門名", "").strip(),
                 status=row.get("状況区分", "").strip(),
                 transaction_date=parse_date(row.get("取引日付", "")),

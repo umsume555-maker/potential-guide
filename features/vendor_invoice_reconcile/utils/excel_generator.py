@@ -72,6 +72,14 @@ class ExcelGenerator:
             if res.status == "UNMAPPED":
                 continue # Skip unmapped in main sheet (or keep separate)
 
+            # 「もれ」かつ金額0円はスキップ
+            if res.status == "MISSING":
+                try:
+                    if int(float(res.invoice_amount or 0)) == 0:
+                        continue
+                except:
+                    pass
+
             row = [
                 res.status, res.base_month, res.vendor_code, res.vendor_name,
                 res.is_monthly, # New
