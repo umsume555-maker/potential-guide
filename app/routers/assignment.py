@@ -146,7 +146,7 @@ async def get_dept_assignments():
     with get_db() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute("SELECT dept_code, dept_name, assignee FROM masters_assign_dept_override ORDER BY dept_code")
+        cursor.execute("SELECT dept_code, dept_name, assignee, COALESCE(assignee2, '') as assignee2 FROM masters_assign_dept_override ORDER BY dept_code")
         return [dict(row) for row in cursor.fetchall()]
 
 @router.get("/vendor")
@@ -155,7 +155,7 @@ async def get_vendor_assignments():
     with get_db() as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute("SELECT vendor_code, vendor_name, assignee FROM masters_assign_vendor ORDER BY vendor_code")
+        cursor.execute("SELECT vendor_code, vendor_name, assignee, COALESCE(assignee2, '') as assignee2 FROM masters_assign_vendor ORDER BY vendor_code")
         return [dict(row) for row in cursor.fetchall()]
 
 @router.post("/dept")
@@ -165,7 +165,6 @@ async def update_dept_assignment(data: AssigneeUpdate):
         cursor = conn.cursor()
         cursor.execute("UPDATE masters_assign_dept_override SET assignee = ? WHERE dept_code = ?", (data.assignee, data.code))
         if cursor.rowcount == 0:
-            # マスタにない場合はエラー（同期してから編集すべき）
            raise HTTPException(status_code=404, detail="指定された部門コードが見つかりません。先に同期を行ってください。")
         conn.commit()
     return {"status": "ok"}
@@ -180,3 +179,153 @@ async def update_vendor_assignment(data: AssigneeUpdate):
            raise HTTPException(status_code=404, detail="指定された取引先コードが見つかりません。先に同期を行ってください。")
         conn.commit()
     return {"status": "ok"}
+
+@router.post("/copy-to-assignee2")
+async def copy_assignee_to_assignee2():
+    """担当1の値を担当2に一括コピー（月初リセット用）"""
+    with get_db() as conn:
+        conn.execute("UPDATE masters_assign_dept_override SET assignee2 = assignee")
+        conn.execute("UPDATE masters_assign_vendor SET assignee2 = assignee")
+        conn.commit()
+    return {"status": "ok", "message": "担当2に担当1をコピーしました"}
+
+
+class PushAssignee2Request(BaseModel):
+    spreadsheet_id: str
+
+
+@router.post("/push-assignee2")
+async def push_assignee2_to_sheet(data: PushAssignee2Request):
+    """DBのassignee2をスプレッドシートの担当2列に反映する"""
+    import sqlite3
+    import re
+    from infra.database import DB_PATH
+
+    spreadsheet_id = data.spreadsheet_id
+    # URL形式の場合はIDを抽出
+    match = re.search(r'/d/([a-zA-Z0-9-_]+)', spreadsheet_id)
+    if match:
+        spreadsheet_id = match.group(1)
+
+    # DB から vendor/dept の assignee2 を取得
+    with sqlite3.connect(str(DB_PATH)) as conn:
+        conn.row_factory = sqlite3.Row
+        vendor_map = {
+            r["vendor_code"]: r["assignee2"] or ""
+            for r in conn.execute("SELECT vendor_code, COALESCE(assignee2,'') as assignee2 FROM masters_assign_vendor").fetchall()
+        }
+        dept_map = {
+            r["dept_code"]: r["assignee2"] or ""
+            for r in conn.execute("SELECT dept_code, COALESCE(assignee2,'') as assignee2 FROM masters_assign_dept_override").fetchall()
+        }
+        # 最新run_idの output_summary から (vendor_code, dept_code, base_invoice_no) を取得
+        run_row = conn.execute("SELECT run_id FROM run_log ORDER BY started_at DESC LIMIT 1").fetchone()
+        if not run_row:
+            return {"status": "error", "message": "チェック実行データがありません"}
+        run_id = run_row["run_id"]
+        summary_rows = conn.execute(
+            "SELECT base_invoice_no, dept_code, vendor_code FROM output_summary WHERE run_id = ?", (run_id,)
+        ).fetchall()
+
+    # (base_invoice_no, dept_code) → assignee2 のマップを作成
+    # 取引先優先、なければ部門
+    row_assignee2 = {}
+    for r in summary_rows:
+        inv = str(r["base_invoice_no"])
+        dept = str(r["dept_code"])
+        try:
+            dept_key = f"{int(dept):08d}"
+        except:
+            dept_key = dept
+        key = f"{inv}_{dept_key}"
+        a2 = vendor_map.get(str(r["vendor_code"]), "") or dept_map.get(str(r["dept_code"]), "")
+        row_assignee2[key] = a2
+
+    # スプレッドシートを開いて担当2列を更新
+    from infra.database import resolve_credentials_path
+    from infra.spreadsheet_service import SpreadsheetService
+    from infra.settings_repository import SettingsRepository
+    import sqlite3 as _sqlite3
+    with _sqlite3.connect(str(DB_PATH)) as _c:
+        _c.row_factory = _sqlite3.Row
+        try:
+            stored = SettingsRepository().get_setting(_c, "google_credentials_path")
+        except Exception:
+            stored = None
+    creds = resolve_credentials_path(stored)
+    if not creds:
+        return {"status": "error", "message": "認証ファイル(credentials.json)が見つかりません"}
+    service = SpreadsheetService(credentials_path=str(creds))
+    try:
+        client = service.authenticate()
+        sh = client.open_by_key(spreadsheet_id)
+        sheet = sh.sheet1
+        all_values = sheet.get_all_values()
+    except Exception as e:
+        return {"status": "error", "message": f"スプレッドシート接続エラー: {e}"}
+
+    if not all_values:
+        return {"status": "error", "message": "スプレッドシートにデータがありません"}
+
+    header = all_values[0]
+
+    # 必要な列インデックスを取得
+    try:
+        idx_invoice = header.index("伝票番号")
+    except ValueError:
+        return {"status": "error", "message": "「伝票番号」列が見つかりません"}
+
+    idx_dept = -1
+    for h in ["申請部門コード", "部門コード"]:
+        if h in header:
+            idx_dept = header.index(h)
+            break
+    if idx_dept == -1:
+        return {"status": "error", "message": "「申請部門コード」列が見つかりません"}
+
+    # 担当2列を探す（なければ担当列の隣に追加）
+    if "担当2" in header:
+        idx_assignee2 = header.index("担当2")
+    else:
+        return {"status": "error", "message": "「担当2」列がスプレッドシートに見つかりません。先にスプレッドシート更新を実行してください。"}
+
+    # 担当2列の値を更新（データ行のみ）
+    updates = []
+    updated_count = 0
+    for row_idx, row in enumerate(all_values[1:], start=2):  # 1-indexed, skip header
+        if len(row) <= max(idx_invoice, idx_dept):
+            continue
+        inv = str(row[idx_invoice])
+        dept = str(row[idx_dept])
+        try:
+            dept = f"{int(dept):08d}"
+        except:
+            pass
+        key = f"{inv}_{dept}"
+        if key in row_assignee2:
+            col_letter = _col_to_letter(idx_assignee2 + 1)
+            updates.append({
+                "range": f"{col_letter}{row_idx}",
+                "values": [[row_assignee2[key]]]
+            })
+            updated_count += 1
+
+    if updates:
+        try:
+            sheet.batch_update(
+                [{"range": u["range"], "values": u["values"]} for u in updates],
+                value_input_option="USER_ENTERED"
+            )
+        except Exception as e:
+            return {"status": "error", "message": f"書き込みエラー: {e}"}
+
+    return {"status": "ok", "message": f"担当2を{updated_count}行反映しました"}
+
+
+def _col_to_letter(col: int) -> str:
+    """列番号（1始まり）をA1記法のアルファベットに変換"""
+    result = ""
+    while col > 0:
+        col, remainder = divmod(col - 1, 26)
+        result = chr(65 + remainder) + result
+    return result

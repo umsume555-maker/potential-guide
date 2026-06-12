@@ -58,9 +58,37 @@ async def startup_event():
     """起動時の初期化"""
     init_database()
     logger.info("データベースを初期化しました")
+
+    # PDF_ARCHIVE内のZIPを自動展開（サーバー起動時に一度だけ実行）
+    _auto_extract_archive_zips()
+
     logger.info("=" * 55)
     logger.info("  起動確認: バージョンチェック OK")
     logger.info("=" * 55)
+
+
+def _auto_extract_archive_zips():
+    """起動時: PDF_ARCHIVE内のZIPファイルを自動展開する"""
+    import zipfile
+    from app.routers.ocr import _extract_zip
+
+    archive_path = project_root / "invoice_ocr" / "PDF_ARCHIVE"
+    if not archive_path.exists():
+        return
+
+    zip_files = list(archive_path.glob("*.zip"))
+    if not zip_files:
+        return
+
+    logger.info(f"PDF_ARCHIVE内のZIPを自動展開します: {len(zip_files)}件")
+    for zf in zip_files:
+        try:
+            _extract_zip(zf, archive_path)
+            zf.unlink()
+            logger.info(f"  展開完了: {zf.name}")
+        except Exception as e:
+            logger.warning(f"  展開失敗: {zf.name} - {e}")
+    logger.info(f"PDF_ARCHIVE 自動展開完了")
 
 
 @app.get("/", response_class=HTMLResponse)

@@ -15,7 +15,7 @@ from infra.settings_repository import SettingsRepository
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 repo = SettingsRepository()
-CONFIG_PATH = Path(__file__).parent.parent.parent / "config.yaml"
+CONFIG_PATH = Path(__file__).parent.parent.parent / "invoice_ocr" / "config.yaml"
 
 class SettingUpdate(BaseModel):
     key: str

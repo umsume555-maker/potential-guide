@@ -10,6 +10,28 @@ from infra.csv_loader import normalize_dept_code
 from infra.retry_utils import call_with_retry
 import os
 
+
+def _load_excluded_dept_map() -> Dict[str, set]:
+    """
+    invoice_reconcile_settings.json から取引先別除外部門コードを読み込む
+    Returns: {vendor_code: set(dept_code, ...)}
+    """
+    settings_path = Path("config/invoice_reconcile_settings.json")
+    result: Dict[str, set] = {}
+    try:
+        if not settings_path.exists():
+            return result
+        with open(settings_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        for vendor_code, tmpl in data.get("templates", {}).items():
+            excluded = tmpl.get("excluded_dept_codes", {})
+            if excluded:
+                result[vendor_code] = set(excluded.keys())
+    except Exception as e:
+        print(f"[WARN] _load_excluded_dept_map エラー: {e}")
+    return result
+
+
 class SpreadsheetService:
     def __init__(self, credentials_path: str):
         self.credentials_path = Path(credentials_path)
@@ -47,15 +69,48 @@ class SpreadsheetService:
 
     def fetch_data_from_db(self, db_path: str, run_id: str) -> List[Dict]:
         """指定されたRUN_IDの出力データを取得（例外部門を除外）"""
+        # サーバーベースURLを取得（課員PCからもリンクが開けるよう localhost を使わない）
+        from domain.services.check_service import _get_server_base_url
+        _base_url = _get_server_base_url()
+
         with sqlite3.connect(db_path) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute(
-                """
+                f"""
                 SELECT
                     o.base_invoice_no, o.dept_code, o.dept_name, o.vendor_code, o.vendor_name,
-                    o.ocr_amount, o.ocr_file_link, o.ocr_drive_link, o.ocr_match_status,
+                    o.ocr_amount,
+                    -- OCRリンク: output_summaryが空の場合、最新のinvoice_ocr_resultsから補完
+                    -- 優先順位: 1) output_summary既存値, 2) 承認番号一致, 3) (部門+取引先)一致
                     COALESCE(
+                        NULLIF(o.ocr_file_link, ''),
+                        (SELECT '=HYPERLINK("{_base_url}/api/ocr/files/' || r.file_name || '", "リンク")'
+                         FROM invoice_ocr_results r
+                         WHERE r.run_id = (
+                             SELECT i2.run_id FROM invoice_ocr_results i2
+                             JOIN run_log rl ON rl.run_id = i2.run_id
+                             ORDER BY rl.started_at DESC LIMIT 1
+                         )
+                         AND r.target_decision_no = o.base_invoice_no
+                         AND r.file_name IS NOT NULL AND r.file_name != ''
+                         LIMIT 1),
+                        (SELECT '=HYPERLINK("{_base_url}/api/ocr/files/' || r.file_name || '", "リンク")'
+                         FROM invoice_ocr_results r
+                         WHERE r.run_id = (
+                             SELECT i2.run_id FROM invoice_ocr_results i2
+                             JOIN run_log rl ON rl.run_id = i2.run_id
+                             ORDER BY rl.started_at DESC LIMIT 1
+                         )
+                         AND r.dept_code = o.dept_code
+                         AND r.vendor_code = o.vendor_code
+                         AND r.file_name IS NOT NULL AND r.file_name != ''
+                         LIMIT 1)
+                    ) as ocr_file_link,
+                    o.ocr_drive_link, o.ocr_match_status,
+                    COALESCE(
+                        NULLIF(av.assignee2, ''),
                         NULLIF(av.assignee, ''),
+                        NULLIF(ad.assignee2, ''),
                         NULLIF(ad.assignee, ''),
                         o.assigned_proposed,
                         ''
@@ -66,7 +121,7 @@ class SpreadsheetService:
                     o.tax_category, o.tax_category_name, o.tax_result, o.tax_expected,
                     o.account_code, o.account_name, o.account_result, o.account_expected, o.account_expected_name,
                     o.anomaly_result, o.anomaly_type, o.is_monthly,
-                    o.status,
+                    o.status, o.bank_account_info,
                     o.overall_result, o.review_reason,
                     o.amount_3m_ago, o.count_3m_ago,
                     o.amount_2m_ago, o.count_2m_ago,
@@ -77,6 +132,7 @@ class SpreadsheetService:
                      FROM masters_vendor_notes vn
                      JOIN masters_note_labels nl ON nl.id = vn.label_id
                      WHERE vn.vendor_code = o.vendor_code) as vendor_notes
+                ,COALESCE(NULLIF(av.assignee2,''), NULLIF(ad.assignee2,''), '') as assignee2
                 FROM output_summary o
                 LEFT JOIN masters_assign_vendor av ON av.vendor_code = o.vendor_code
                 LEFT JOIN masters_assign_dept_override ad ON ad.dept_code = o.dept_code
@@ -163,6 +219,20 @@ class SpreadsheetService:
         except:
             return None
 
+    def _extract_filename_from_url(self, url: str):
+        """プレーンURL（HYPERLINK数式なし）からファイル名を抽出。__MULTI__形式の各URL用。"""
+        if not url: return None
+        try:
+            token = "/files/"
+            idx = url.find(token)
+            if idx == -1: return None
+            fname = url[idx + len(token):]
+            # クエリ文字列・フラグメントを除去
+            fname = fname.split("?")[0].split("#")[0].strip()
+            return fname if fname else None
+        except:
+            return None
+
     def _load_drive_cache(self, db_path: str) -> dict:
         """drive_file_cache テーブルから {file_name: drive_link} を返す"""
         try:
@@ -220,7 +290,8 @@ class SpreadsheetService:
                     file_map[p.name] = p
 
             # --- 各行の処理: ocr_drive_link → キャッシュ → アップロード待ち ---
-            to_upload = []  # (row, fname, local_path)
+            to_upload = []      # (row, fname, local_path)  単一リンク用
+            multi_pending = []  # (row, resolved_urls, [(idx, fname, local_path)])  __MULTI__用
             cache_hits = 0
 
             for row in db_rows:
@@ -231,14 +302,47 @@ class SpreadsheetService:
                     continue
 
                 ocr_link = row.get("ocr_file_link")
-                if not ocr_link or "localhost" not in ocr_link:
+                if not ocr_link:
+                    continue
+
+                # 2. __MULTI__ 形式（複数ファイル）
+                if ocr_link.startswith("__MULTI__"):
+                    urls = [u for u in ocr_link[len("__MULTI__"):].split("|") if u]
+                    resolved = list(urls)
+                    items_to_upload = []
+
+                    for i, url in enumerate(urls):
+                        if "localhost" not in url:
+                            continue
+                        fname = self._extract_filename_from_url(url)
+                        if not fname:
+                            continue
+                        if fname in cache:
+                            resolved[i] = cache[fname]["link"]
+                            cache_hits += 1
+                        else:
+                            local_path = file_map.get(fname)
+                            if local_path:
+                                items_to_upload.append((i, fname, local_path))
+                            else:
+                                print(f"[WARN] File not found for __MULTI__ upload: {fname}")
+
+                    if not items_to_upload:
+                        # 全てキャッシュ解決済み → 即座に更新
+                        row["ocr_file_link"] = "__MULTI__" + "|".join(resolved)
+                    else:
+                        multi_pending.append((row, resolved, items_to_upload))
+                    continue
+
+                # 3. 単一リンク
+                if "localhost" not in ocr_link:
                     continue
 
                 fname = self._extract_filename(ocr_link)
                 if not fname:
                     continue
 
-                # 2. キャッシュにあれば Drive API 不要
+                # キャッシュにあれば Drive API 不要
                 if fname in cache:
                     cached_link = cache[fname]["link"]
                     row["ocr_drive_link"] = cached_link
@@ -246,7 +350,7 @@ class SpreadsheetService:
                     cache_hits += 1
                     continue
 
-                # 3. キャッシュになければアップロード対象
+                # キャッシュになければアップロード対象
                 local_path = file_map.get(fname)
                 if not local_path:
                     print(f"[WARN] File not found for upload: {fname}")
@@ -254,9 +358,9 @@ class SpreadsheetService:
 
                 to_upload.append((row, fname, local_path))
 
-            print(f"[INFO] Drive upload: cache_hits={cache_hits}, to_upload={len(to_upload)}")
+            print(f"[INFO] Drive upload: cache_hits={cache_hits}, to_upload={len(to_upload)}, multi_pending={len(multi_pending)}")
 
-            if not to_upload:
+            if not to_upload and not multi_pending:
                 return
 
             # --- Drive サービス初期化（アップロードが必要な場合のみ）---
@@ -292,6 +396,26 @@ class SpreadsheetService:
                             self._save_drive_cache(db_path, new_cache_entries[-10:])
                 except Exception as e:
                     print(f"[WARN] Upload failed for {fname}: {e}")
+
+            # --- __MULTI__ アップロード ---
+            for row, resolved, items in multi_pending:
+                for idx, fname, local_path in items:
+                    # 単一リンク処理で同名ファイルが既にアップロード済みなら流用
+                    already = next((e for e in new_cache_entries if e[0] == fname), None)
+                    if already:
+                        resolved[idx] = already[1]
+                        continue
+                    try:
+                        print(f"[INFO] Uploading (multi): {fname}")
+                        uploaded = drive_service.upload_file(str(local_path), folder_id)
+                        web_link = uploaded.get('webViewLink')
+                        file_id = uploaded.get('id')
+                        if web_link:
+                            resolved[idx] = web_link
+                            new_cache_entries.append((fname, web_link, file_id))
+                    except Exception as e:
+                        print(f"[WARN] Upload failed for {fname}: {e}")
+                row["ocr_file_link"] = "__MULTI__" + "|".join(resolved)
 
             print(f"[INFO] Drive upload complete: {len(new_cache_entries)} new files uploaded.")
 
@@ -357,13 +481,15 @@ class SpreadsheetService:
         idx_dept = -1
         idx_status = -1
         idx_remark = -1
-        
+        idx_assignee2 = -1
+
         for i, h in enumerate(existing_header):
             if h == "伝票番号": idx_invoice = i
             elif h in ["部門コード", "申請部門コード"]: idx_dept = i
             elif h == "ステータス": idx_status = i
             elif h in ["備考", "コメント"]: idx_remark = i
-            
+            elif h == "担当2": idx_assignee2 = i
+
         # KEY: base_invoice_no + dept_code (ユニークキーと仮定)
         existing_map = {}
         if idx_invoice != -1 and idx_dept != -1:
@@ -371,7 +497,7 @@ class SpreadsheetService:
                 # 行の長さチェック
                 if len(row) <= max(idx_invoice, idx_dept):
                     continue
-                    
+
                 inv = str(row[idx_invoice])
                 dept = str(row[idx_dept])
                 # 既存データの部門コードも正規化してキーを作成
@@ -380,18 +506,23 @@ class SpreadsheetService:
                 except:
                     pass
                 key = f"{inv}_{dept}"
-                
+
                 status_val = ""
                 if idx_status != -1 and len(row) > idx_status:
                     status_val = row[idx_status]
-                    
+
                 remark_val = ""
                 if idx_remark != -1 and len(row) > idx_remark:
                     remark_val = row[idx_remark]
-                
+
+                assignee2_val = ""
+                if idx_assignee2 != -1 and len(row) > idx_assignee2:
+                    assignee2_val = row[idx_assignee2]
+
                 existing_map[key] = {
                     "ステータス": status_val,
-                    "備考": remark_val
+                    "備考": remark_val,
+                    "担当2": assignee2_val,
                 }
 
         # 2. DBから最新データを取得
@@ -423,6 +554,7 @@ class SpreadsheetService:
             ("当月請求書", "ocr_amount"),
             ("支払金額", "payment_amount"),
             ("担当", "assignee"),
+            ("担当2", "assignee2"),
             ("取引日付", "transaction_date"),
             ("注意事項", "vendor_notes"),
             ("取引先コード", "vendor_code"),
@@ -455,7 +587,8 @@ class SpreadsheetService:
             ("支払先相違", "vendor_payee_result"),
             ("支払先コード", "payee_code"),
             ("伝票番号", "base_invoice_no"),
-            ("状況区分", "status")
+            ("状況区分", "status"),
+            ("口座番号", "bank_account_info")
         ]
         
         # マニュアル列(右)
@@ -556,6 +689,12 @@ class SpreadsheetService:
             
             # 備考の維持 (これは常に維持)
             row_data["ステータス"] = new_status
+            # 担当2はスプシ更新時に一切触れない（既存値を常に維持）
+            # 書き込みは「担当2をスプシに反映」ボタンからのみ行う
+            if key in existing_map:
+                row_data["担当2"] = str(existing_map[key].get("担当2", "")).strip()
+            else:
+                row_data["担当2"] = ""  # 新規行は空欄
             # マニュアル列の維持
             for m_col in manual_right:
                 val = ""
@@ -1008,19 +1147,40 @@ class SpreadsheetService:
                         
                         from domain.validators.anomaly_check import find_missing_vendors
                         missing_rows = find_missing_vendors(conn, base_month, current_pairs)
-                        
-                        # 重複排除用セット (dept_code, vendor_code)
+
+                        # 取引先別除外部門マップを読み込む
+                        _excluded_dept_map = _load_excluded_dept_map()
+
+                        # 重複排除用セット (normalize(dept_code), vendor_code)
+                        # 正規化して照合することで先頭ゼロの違いによる重複を防ぐ
                         existing_keys = set()
                         for row in db_rows:
-                            existing_keys.add((str(row["dept_code"]).strip(), str(row["vendor_code"]).strip()))
+                            _dk = normalize_dept_code(str(row["dept_code"]).strip())
+                            _vk = str(row["vendor_code"]).strip()
+                            existing_keys.add((_dk, _vk))
+                        # 「月ズレ？」が既にある (dept, vendor) を記録 → 後で「もれ」を除外するため
+                        gap_keys = set()
+                        for row in db_rows:
+                            if str(row.get("anomaly_type", "")).strip() in ("月ズレ？", "取引日付ズレ？"):
+                                gap_keys.add((normalize_dept_code(str(row["dept_code"]).strip()), str(row["vendor_code"]).strip()))
 
                         if missing_rows:
                             count_added = 0
                             for m_row in missing_rows:
-                                key = (str(m_row["dept_code"]).strip(), str(m_row["vendor_code"]).strip())
+                                _v = str(m_row["vendor_code"]).strip()
+                                _d = normalize_dept_code(str(m_row["dept_code"]).strip())
+                                key = (_d, _v)
                                 if key in existing_keys:
                                     continue
-                                
+                                # 「月ズレ？」が既にある場合は「もれ」を追加しない
+                                if key in gap_keys:
+                                    print(f"[INFO] モレ除外（月ズレ優先）: vendor={_v}, dept={_d}")
+                                    continue
+                                # 除外部門チェック
+                                if str(m_row["dept_code"]).strip() in _excluded_dept_map.get(_v, set()) or _d in _excluded_dept_map.get(_v, set()):
+                                    print(f"[INFO] モレ除外（除外部門設定）: vendor={_v}, dept={_d}")
+                                    continue
+
                                 existing_keys.add(key)
                                 combined_row = {
                                     "dept_code": m_row["dept_code"],
@@ -1037,9 +1197,9 @@ class SpreadsheetService:
                         
                         # --- 1.6. 突合結果の「もれ」データ取得 [NEW] ---
                         # 同じ基準月の突合実行結果(output_summary)から「もれ」を取得
-                        # チェック実行のシート更新で全上書きされても消えないようにする
+                        # 取引先ごとに最新 run のみ参照（古い run の「もれ」が混入しないよう）
                         try:
-                            conn.row_factory = sqlite3.Row
+                            conn.row_factory = None
                             reconcile_more = conn.execute("""
                                 SELECT o.dept_code, o.dept_name, o.vendor_code, o.vendor_name,
                                        o.payment_amount, o.transaction_date, o.anomaly_type
@@ -1052,9 +1212,35 @@ class SpreadsheetService:
                                   AND COALESCE(o.payment_amount, 0) > 0
                                   AND ex_d.dept_code IS NULL
                                   AND ex_v.vendor_code IS NULL
-                                ORDER BY rl.started_at DESC
-                            """, (base_month,)).fetchall()
-                            conn.row_factory = None
+                                  -- 最新runで実取引として解消済みでない(dept, vendor)のみ表示
+                                  AND NOT EXISTS (
+                                      SELECT 1
+                                      FROM output_summary os_new
+                                      JOIN run_log rl_new ON os_new.run_id = rl_new.run_id
+                                      WHERE rl_new.base_month = ?
+                                        AND os_new.vendor_code = o.vendor_code
+                                        AND os_new.dept_code = o.dept_code
+                                        AND (os_new.anomaly_type IS NULL OR os_new.anomaly_type != 'もれ')
+                                        AND rl_new.run_id = (
+                                            SELECT run_id FROM run_log
+                                            WHERE base_month = ?
+                                            ORDER BY started_at DESC LIMIT 1
+                                        )
+                                  )
+                                  -- (dept, vendor)ごとに最新の「もれ」1件のみ取得（重複防止）
+                                  AND o.run_id = (
+                                      SELECT rl2.run_id
+                                      FROM run_log rl2
+                                      JOIN output_summary os2 ON rl2.run_id = os2.run_id
+                                      WHERE rl2.base_month = ?
+                                        AND os2.vendor_code = o.vendor_code
+                                        AND os2.dept_code = o.dept_code
+                                        AND os2.anomaly_type = 'もれ'
+                                      ORDER BY rl2.started_at DESC
+                                      LIMIT 1
+                                  )
+                                ORDER BY o.dept_code
+                            """, (base_month, base_month, base_month, base_month)).fetchall()
                             
                             print(f"[INFO] 突合「もれ」候補: {len(reconcile_more)}件 (base_month={base_month})")
                             
@@ -1062,9 +1248,19 @@ class SpreadsheetService:
                             for r_row in reconcile_more:
                                 # SELECT o.dept_code(0), o.dept_name(1), o.vendor_code(2), o.vendor_name(3),
                                 #        o.payment_amount(4), o.transaction_date(5), o.anomaly_type(6)
-                                key = (str(r_row[0]).strip(), str(r_row[2]).strip())
+                                _rd = normalize_dept_code(str(r_row[0]).strip())
+                                _rv = str(r_row[2]).strip()
+                                key = (_rd, _rv)
                                 if key in existing_keys:
-                                    print(f"[INFO]   スキップ(重複): dept={key[0]}, vendor={key[1]}")
+                                    print(f"[INFO]   スキップ(重複): dept={_rd}, vendor={_rv}")
+                                    continue
+                                # 「月ズレ？」が既にある場合は「もれ」を追加しない
+                                if key in gap_keys:
+                                    print(f"[INFO]   スキップ(月ズレ優先): dept={_rd}, vendor={_rv}")
+                                    continue
+                                # 除外部門チェック
+                                if str(r_row[0]).strip() in _excluded_dept_map.get(_rv, set()) or _rd in _excluded_dept_map.get(_rv, set()):
+                                    print(f"[INFO]   スキップ(除外部門): dept={r_row[0]}, vendor={r_row[2]}")
                                     continue
                                 existing_keys.add(key)
                                 db_rows.append({
@@ -1090,6 +1286,64 @@ class SpreadsheetService:
                 traceback.print_exc()
                 log["missing_check_error"] = str(e)
             
+            # --- 1.7. 月ズレ優先フィルタ ---
+            # 同じ取引先・同じ金額で「月ズレ？」が存在する場合、「もれ」を抑制する
+            # (部門コードが違っても同一取引とみなす)
+            try:
+                gap_vendor_amounts = set()
+                # db_rows 内の月ズレ？
+                for row in db_rows:
+                    _at = str(row.get("anomaly_type", "")).strip()
+                    if _at in ("月ズレ？", "取引日付ズレ？"):
+                        try:
+                            _amt = int(float(str(row.get("payment_amount", 0) or 0)))
+                        except Exception:
+                            _amt = 0
+                        if _amt > 0:
+                            gap_vendor_amounts.add((str(row.get("vendor_code", "")).strip(), _amt))
+                # output_summary の DATE_DIFF / DATE_GAP も追加（reconcile 結果）
+                try:
+                    with sqlite3.connect(db_path) as _conn2:
+                        _conn2.row_factory = sqlite3.Row
+                        _gap_rows = _conn2.execute("""
+                            SELECT o.vendor_code, o.payment_amount
+                            FROM output_summary o
+                            JOIN run_log rl ON o.run_id = rl.run_id
+                            WHERE rl.base_month = ?
+                              AND o.status IN ('DATE_DIFF', 'DATE_GAP')
+                              AND COALESCE(o.payment_amount, 0) > 0
+                        """, (base_month,)).fetchall()
+                        for _gr in _gap_rows:
+                            try:
+                                _amt2 = int(float(str(_gr["payment_amount"] or 0)))
+                            except Exception:
+                                _amt2 = 0
+                            if _amt2 > 0:
+                                gap_vendor_amounts.add((str(_gr["vendor_code"]).strip(), _amt2))
+                except Exception:
+                    pass
+
+                if gap_vendor_amounts:
+                    before_len = len(db_rows)
+                    filtered_rows = []
+                    for row in db_rows:
+                        _at = str(row.get("anomaly_type", "")).strip()
+                        if _at in ("もれ", "毎月あるのに今月ない", "毎月あるけど今月なし"):
+                            try:
+                                _amt = int(float(str(row.get("payment_amount", 0) or 0)))
+                            except Exception:
+                                _amt = 0
+                            _vk = str(row.get("vendor_code", "")).strip()
+                            if (_vk, _amt) in gap_vendor_amounts:
+                                print(f"[INFO] もれ抑制（月ズレ優先）: vendor={_vk}, dept={row.get('dept_code','')}, amt={_amt}")
+                                continue
+                        filtered_rows.append(row)
+                    db_rows = filtered_rows
+                    if len(db_rows) < before_len:
+                        print(f"[INFO] 月ズレ優先フィルタ: {before_len} → {len(db_rows)} 件")
+            except Exception as _ef:
+                print(f"[WARN] 月ズレ優先フィルタエラー: {_ef}")
+
             # データが0件でもシートをクリアするために続行する
             if not db_rows:
                 log["status"] = "cleared"

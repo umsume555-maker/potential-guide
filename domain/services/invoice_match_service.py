@@ -19,9 +19,9 @@ class InvoiceMatchService:
     def _load_config(self):
         try:
             import yaml
-            # domain/services/ -> root
+            # domain/services/ -> root -> invoice_ocr/config.yaml
             base_dir = Path(__file__).resolve().parent.parent.parent
-            config_path = base_dir / "config.yaml"
+            config_path = base_dir / "invoice_ocr" / "config.yaml"
             if config_path.exists():
                 with open(config_path, "r", encoding="utf-8") as f:
                     return yaml.safe_load(f)
@@ -37,7 +37,19 @@ class InvoiceMatchService:
             fast: Trueの場合、Geminiによる傾き補正をスキップして高速化
         """
         self.logger.info(f"Starting OCR matching for RunID: {run_id}")
-        
+
+        # run_log を「OCR実行中」に更新（チェック実行が完了済みにしている状態を上書き）
+        from datetime import datetime
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    "UPDATE run_log SET status='running', ended_at=NULL WHERE run_id=?",
+                    (run_id,)
+                )
+                conn.commit()
+        except Exception as e:
+            self.logger.warning(f"Failed to update run_log status to running: {e}")
+
         # 1. フォルダスキャン
         folders = scan_folder(zip_out_path)
         self.logger.info(f"Found {len(folders)} approval folders")
@@ -177,8 +189,10 @@ class InvoiceMatchService:
             detected_amount = extracted.amount
             
             # 全ファイル名を記録（請求書 + 稟議書、カンマ区切り）
+            # 同名ファイルが別フォルダに存在する場合の誤リンクを防ぐため
+            # 「承認番号/ファイル名」形式で保存して一意に特定できるようにする
             all_files = invoice_files + ringi_files
-            file_names = ",".join(f.name for f in all_files)
+            file_names = ",".join(f"{folder_approval_no}/{f.name}" for f in all_files)
             
             # --- 突合ロジック ---
             candidates = summary_map.get((dept_code, vendor_code), [])
@@ -259,7 +273,19 @@ class InvoiceMatchService:
         # 4. 残りを保存
         if results_to_save:
             self._save_results(results_to_save)
-        
+
+        # run_log を「OCR完了」に更新
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    "UPDATE run_log SET status='completed', ended_at=? WHERE run_id=?",
+                    (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), run_id)
+                )
+                conn.commit()
+            self.logger.info(f"OCR matching completed: {processed_count} files processed")
+        except Exception as e:
+            self.logger.warning(f"Failed to update run_log status to completed: {e}")
+
         return {
             "processed_files": processed_count,
             "match_ok": match_ok_count,

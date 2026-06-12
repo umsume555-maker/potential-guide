@@ -1,7 +1,7 @@
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Union, Literal
 from datetime import date
-print("[DEBUG] Loading features.vendor_invoice_reconcile.models (Updated 2026-02-14 22:15)")
+print("[DEBUG] Loading features.vendor_invoice_reconcile.models (Updated 2026-05-14 excluded_dept_codes)")
 
 class InvoiceRecord(BaseModel):
     """
@@ -73,5 +73,9 @@ class TemplateConfig(BaseModel):
     
     # マッピング辞書 (Raw Dept Name -> Dept Code or List of Dept Codes)
     dept_synonyms: Dict[str, Union[str, List[str]]] = Field(default_factory=dict)
-    
+
+    # 除外部門 (Dept Code -> 理由)
+    # 請求一覧突合・現場シートの「もれ」から除外する部門コードと理由
+    excluded_dept_codes: Dict[str, str] = Field(default_factory=dict, description="除外部門 {dept_code: reason}")
+
     last_updated: str = Field(..., description="最終更新日時")

@@ -134,6 +134,25 @@ def init_database() -> None:
             """)
             logger.debug("Migration: Guaranteed drive_file_cache table")
 
+            # OCR ZIP処理履歴（差分解析用）
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS ocr_zip_log (
+                    zip_filename TEXT PRIMARY KEY,
+                    zip_size     INTEGER NOT NULL,
+                    processed_at TEXT DEFAULT (datetime('now', 'localtime'))
+                )
+            """)
+            logger.debug("Migration: Guaranteed ocr_zip_log table")
+
+            # 担当2カラム追加（部門・取引先担当テーブル）
+            for table, pk in [("masters_assign_dept_override", "dept_code"),
+                               ("masters_assign_vendor", "vendor_code")]:
+                cursor = conn.execute(f"PRAGMA table_info({table})")
+                cols = [r["name"] for r in cursor.fetchall()]
+                if "assignee2" not in cols:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN assignee2 TEXT DEFAULT ''")
+                    logger.info(f"Migration: Added assignee2 column to {table}")
+
             conn.commit()
         except Exception as e:
             logger.warning("Migration Warning: %s", e)

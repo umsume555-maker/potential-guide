@@ -11,6 +11,22 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
+
+def _get_server_base_url() -> str:
+    """サーバーのベースURLを取得（config/server_base_url.txt から読む）
+    起動時に run_server.bat が自動更新する。
+    ファイルがない場合は localhost にフォールバック。
+    """
+    try:
+        config_path = Path(__file__).resolve().parent.parent.parent / "config" / "server_base_url.txt"
+        if config_path.exists():
+            url = config_path.read_text(encoding="utf-8").strip()
+            if url:
+                return url.rstrip("/")
+    except Exception:
+        pass
+    return "http://localhost:8000"
+
 from infra.database import get_db, init_database
 from domain.services.result_saver import save_results as _save_results_func
 from infra.csv_loader import (
@@ -347,10 +363,10 @@ class CheckService:
                             ).date()
                             expected_date = calculate_expected_payment_date(
                                 tx_date,
-                                closing_day=vendor_master.get("closing_day", 0) or 0,
-                                payment_month_offset=vendor_master.get("payment_month_offset", 1) or 1,
-                                payment_day=vendor_master.get("payment_day", 0) or 0,
-                                holiday_handling=vendor_master.get("holiday_handling", "1") or "1",
+                                closing_day=vendor_master.get("closing_day") if vendor_master.get("closing_day") is not None else 99,
+                                payment_month_offset=vendor_master.get("payment_month_offset") if vendor_master.get("payment_month_offset") is not None else 1,
+                                payment_day=vendor_master.get("payment_day") if vendor_master.get("payment_day") is not None else 99,
+                                holiday_handling=vendor_master.get("holiday_handling") or "1",
                                 holidays=self.holidays,
                                 no_month_crossing=bool(vendor_master.get("no_month_crossing", 0))
                             )
@@ -437,11 +453,12 @@ class CheckService:
                         ocr_amount = matched_ocr["detected_amount"]
                         # ファイル名がカンマ区切りの場合（複数ファイル）
                         fnames = [f.strip() for f in matched_ocr["file_name"].split(",") if f.strip()]
+                        _base_url = _get_server_base_url()
                         if len(fnames) == 1:
-                            ocr_file_link = f'=HYPERLINK("http://localhost:8000/api/ocr/files/{fnames[0]}", "リンク")'
+                            ocr_file_link = f'=HYPERLINK("{_base_url}/api/ocr/files/{fnames[0]}", "リンク")'
                         elif len(fnames) > 1:
                             # __MULTI__形式でURLリストを保存 → spreadsheet_serviceでリッチテキスト化
-                            base = "http://localhost:8000/api/ocr/files/"
+                            base = f"{_base_url}/api/ocr/files/"
                             ocr_file_link = "__MULTI__" + "|".join(f"{base}{fn}" for fn in fnames)
 
 
@@ -756,10 +773,36 @@ class CheckService:
 
             inf = float('inf')
 
-            # コストリスト: (cost, summary_idx, candidate_idx)
-            cost_pairs = []
-            for i, (inv_no, summary) in enumerate(summary_list):
-                for j, cand in enumerate(candidates):
+            # ① 最優先: target_decision_no == inv_no で直接マッチング
+            #    （金額ベースより確実。同一取引先に複数伝票がある場合の逆転防止）
+            remaining_summaries = []
+            remaining_candidates = list(candidates)
+            for inv_no, summary in summary_list:
+                matched_cand = None
+                for ci, cand in enumerate(remaining_candidates):
+                    tdno = str(cand.get('target_decision_no') or '').strip()
+                    if tdno and tdno == str(inv_no).strip():
+                        matched_cand = cand
+                        remaining_candidates.pop(ci)
+                        break
+                if matched_cand is not None:
+                    assignments[inv_no] = matched_cand
+                else:
+                    remaining_summaries.append((inv_no, summary))
+
+            # 全件が承認番号でマッチ済みなら次のグループへ
+            if not remaining_summaries or not remaining_candidates:
+                continue
+
+            # ② 残りはコストマトリクスで処理
+            summary_list = remaining_summaries
+            candidates = remaining_candidates
+
+            # コストマトリクスを計算
+            cost_matrix = []
+            for inv_no, summary in summary_list:
+                row_costs = []
+                for cand in candidates:
                     det_amt = cand.get('detected_amount')
                     if det_amt is None:
                         cost = inf
@@ -768,10 +811,33 @@ class CheckService:
                             cost = abs(float(det_amt) - float(summary.payment_amount))
                         except Exception:
                             cost = inf
+                    row_costs.append(cost)
+                cost_matrix.append(row_costs)
+
+            # 全コストが inf（金額未検出）の場合: 支払金額昇順 × 検出金額昇順でペアリング
+            # これにより「小さい金額のサマリ → 小さい金額のOCR候補」と対応付け、
+            # DB格納順による非決定的な逆転割り当てを防ぐ
+            all_inf = all(c == inf for row in cost_matrix for c in row)
+            if all_inf:
+                sorted_summaries = sorted(summary_list, key=lambda x: float(x[1].payment_amount or 0))
+                sorted_candidates = sorted(
+                    candidates,
+                    key=lambda c: (float(c['detected_amount']) if c.get('detected_amount') is not None else inf,
+                                   c.get('file_name', ''))
+                )
+                for (inv_no, _), cand in zip(sorted_summaries, sorted_candidates):
+                    assignments[inv_no] = cand
+                # 候補がサマリより多い場合は残りを破棄（割り当て不可）
+                continue
+
+            # 通常ケース: コスト昇順でグリーディーマッチング
+            cost_pairs = []
+            for i, row_costs in enumerate(cost_matrix):
+                for j, cost in enumerate(row_costs):
                     cost_pairs.append((cost, i, j))
 
-            # コスト昇順でソート（同コストは早いインデックス優先）
-            cost_pairs.sort()
+            # コスト昇順でソート（同コストは file_name 昇順で決定論的に）
+            cost_pairs.sort(key=lambda x: (x[0], candidates[x[2]].get('file_name', ''), x[1]))
 
             assigned_summ = set()
             assigned_cand = set()
@@ -841,6 +907,7 @@ class CheckService:
                    detected_amount, file_name, confidence
             FROM invoice_ocr_results
             WHERE run_id = ?
+            ORDER BY file_name
         """, (run_id,))
 
         by_decision: Dict[str, dict] = {}

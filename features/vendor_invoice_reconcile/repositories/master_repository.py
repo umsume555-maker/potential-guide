@@ -53,8 +53,10 @@ class MasterRepository:
     def get_cumulative_data(self, base_month: str, vendor_codes: List[str]) -> List[dict]:
         """
         指定月・取引先の実績データを取得（集計前）
-        累積テーブルにデータがない場合（月次更新未実施）は、
-        output_summary（チェック実行結果）も参照してMISSING誤検知を防ぐ。
+
+        優先順位:
+          1. 基準月の最新チェック実行（output_summary）― 削除済み申請を含まない最新状態
+          2. output_summaryがない場合のみ cumulative にフォールバック（過去月対応）
         """
         if not vendor_codes:
             return []
@@ -64,7 +66,31 @@ class MasterRepository:
         with get_db() as conn:
             conn.row_factory = sqlite3.Row
 
-            # 1. 累積テーブルから取得
+            # 1. 基準月の最新チェック実行 run_id を取得（input_rows >= 100 の本番run）
+            latest_run = conn.execute("""
+                SELECT run_id FROM run_log
+                WHERE base_month = ? AND input_rows >= 100
+                ORDER BY started_at DESC LIMIT 1
+            """, (base_month,)).fetchone()
+
+            os_rows = []
+            if latest_run:
+                run_id = latest_run["run_id"]
+                sql_os = f"""
+                    SELECT o.vendor_code, o.dept_code, o.dept_name, o.payment_amount,
+                           o.transaction_date, o.base_invoice_no
+                    FROM output_summary o
+                    WHERE o.run_id = ?
+                      AND o.vendor_code IN ({placeholders})
+                      AND o.payment_amount > 0
+                """
+                os_rows = [dict(r) for r in conn.execute(sql_os, [run_id] + vendor_codes).fetchall()]
+
+            # 2. output_summary にデータがあればそれを返す（最新チェック実行が真実）
+            if os_rows:
+                return os_rows
+
+            # 3. output_summary がない場合のみ cumulative にフォールバック（過去月等）
             sql_cum = f"""
                 SELECT vendor_code, dept_code, dept_name, payment_amount,
                        transaction_date, base_invoice_no
@@ -72,63 +98,78 @@ class MasterRepository:
                 WHERE yyyymm = ?
                   AND vendor_code IN ({placeholders})
             """
-            cum_rows = [dict(r) for r in conn.execute(sql_cum, [base_month] + vendor_codes).fetchall()]
-
-            # 2. output_summary から当月分を取得（月次更新未実施の当月対応）
-            #    大きなチェック実行run（input_rows >= 100）のみ対象
-            sql_os = f"""
-                SELECT o.vendor_code, o.dept_code, o.dept_name, o.payment_amount,
-                       o.transaction_date, o.base_invoice_no
-                FROM output_summary o
-                JOIN run_log r ON o.run_id = r.run_id
-                WHERE r.base_month = ?
-                  AND o.vendor_code IN ({placeholders})
-                  AND r.input_rows >= 100
-                  AND o.payment_amount > 0
-            """
-            os_rows = [dict(r) for r in conn.execute(sql_os, [base_month] + vendor_codes).fetchall()]
-
-            # 3. 重複排除：base_invoice_no で一意化
-            #    cumulative 優先、次に output_summary（最新run）
-            seen_keys = {r["base_invoice_no"] for r in cum_rows if r.get("base_invoice_no")}
-            os_rows_dedup = []
-            for r in os_rows:
-                key = r.get("base_invoice_no")
-                if key and key not in seen_keys:
-                    seen_keys.add(key)
-                    os_rows_dedup.append(r)
-
-            return cum_rows + os_rows_dedup
+            return [dict(r) for r in conn.execute(sql_cum, [base_month] + vendor_codes).fetchall()]
 
 
     def get_cumulative_data_all(self, base_month: str, exclude_vendor_codes: List[str] = None) -> List[dict]:
         """
         指定月の全取引先の実績データを取得（除外リスト指定可）
         「毎月あるのに今月なし」の全取引先チェックに使用
+
+        優先順位:
+          1. 基準月の最新チェック実行（output_summary）
+          2. output_summaryがない場合のみ cumulative にフォールバック
         """
-        if exclude_vendor_codes:
-            placeholders = ",".join(["?"] * len(exclude_vendor_codes))
-            sql = f"""
-                SELECT vendor_code, vendor_name, dept_code, dept_name, payment_amount, transaction_date
-                FROM cumulative
-                WHERE yyyymm = ?
-                  AND vendor_code NOT IN ({placeholders})
-                  AND payment_amount > 0
-            """
-            params = [base_month] + exclude_vendor_codes
-        else:
-            sql = """
-                SELECT vendor_code, vendor_name, dept_code, dept_name, payment_amount, transaction_date
-                FROM cumulative
-                WHERE yyyymm = ?
-                  AND payment_amount > 0
-            """
-            params = [base_month]
-        
+        exclude_vendor_codes = exclude_vendor_codes or []
+
         with get_db() as conn:
             conn.row_factory = sqlite3.Row
-            cursor = conn.execute(sql, params)
-            return [dict(row) for row in cursor.fetchall()]
+
+            # 1. 基準月の最新チェック実行 run_id を取得
+            latest_run = conn.execute("""
+                SELECT run_id FROM run_log
+                WHERE base_month = ? AND input_rows >= 100
+                ORDER BY started_at DESC LIMIT 1
+            """, (base_month,)).fetchone()
+
+            if latest_run:
+                run_id = latest_run["run_id"]
+                if exclude_vendor_codes:
+                    ex_ph = ",".join(["?"] * len(exclude_vendor_codes))
+                    sql_os = f"""
+                        SELECT o.vendor_code, o.vendor_name, o.dept_code, o.dept_name,
+                               o.payment_amount, o.transaction_date
+                        FROM output_summary o
+                        WHERE o.run_id = ?
+                          AND o.vendor_code NOT IN ({ex_ph})
+                          AND o.payment_amount > 0
+                    """
+                    params_os = [run_id] + exclude_vendor_codes
+                else:
+                    sql_os = """
+                        SELECT o.vendor_code, o.vendor_name, o.dept_code, o.dept_name,
+                               o.payment_amount, o.transaction_date
+                        FROM output_summary o
+                        WHERE o.run_id = ?
+                          AND o.payment_amount > 0
+                    """
+                    params_os = [run_id]
+
+                os_rows = [dict(r) for r in conn.execute(sql_os, params_os).fetchall()]
+                if os_rows:
+                    return os_rows
+
+            # 2. output_summary がない場合のみ cumulative にフォールバック
+            if exclude_vendor_codes:
+                ex_ph = ",".join(["?"] * len(exclude_vendor_codes))
+                sql = f"""
+                    SELECT vendor_code, vendor_name, dept_code, dept_name, payment_amount, transaction_date
+                    FROM cumulative
+                    WHERE yyyymm = ?
+                      AND vendor_code NOT IN ({ex_ph})
+                      AND payment_amount > 0
+                """
+                params = [base_month] + exclude_vendor_codes
+            else:
+                sql = """
+                    SELECT vendor_code, vendor_name, dept_code, dept_name, payment_amount, transaction_date
+                    FROM cumulative
+                    WHERE yyyymm = ?
+                      AND payment_amount > 0
+                """
+                params = [base_month]
+
+            return [dict(row) for row in conn.execute(sql, params).fetchall()]
 
     def get_all_vendor_names(self) -> Dict[str, str]:
         """

@@ -296,6 +296,70 @@ class VendorCreate(BaseModel):
     vendor_code: str
     vendor_name: str
 
+
+class PaymentConditionUpdate(BaseModel):
+    closing_day: int           # 締日 (99=末日, 1-31)
+    payment_month_offset: int  # 締日から何ヶ月後 (0=当月, 1=翌月, ...)
+    payment_day: int           # 支払日 (99=末日, 1-31)
+    holiday_handling: str      # "1"=前倒し, "2"=後倒し
+    no_month_crossing: int     # 0 or 1
+
+
+@router.get("/vendor/{vendor_code}/payment-condition")
+async def get_payment_condition(vendor_code: str):
+    """取引先の支払条件を取得"""
+    with get_db() as conn:
+        cursor = conn.execute(
+            """
+            SELECT vendor_code, vendor_name,
+                   closing_day, payment_month_offset, payment_day,
+                   holiday_handling, no_month_crossing,
+                   payment_condition_code, payment_condition_name
+            FROM masters_vendor
+            WHERE vendor_code = ?
+            """,
+            (vendor_code,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail=f"取引先が見つかりません: {vendor_code}")
+        return dict(row)
+
+
+@router.patch("/vendor/{vendor_code}/payment-condition")
+async def update_payment_condition(vendor_code: str, data: PaymentConditionUpdate):
+    """取引先の支払条件を更新"""
+    with get_db() as conn:
+        cursor = conn.execute(
+            "SELECT 1 FROM masters_vendor WHERE vendor_code = ?", (vendor_code,)
+        )
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail=f"取引先が見つかりません: {vendor_code}")
+
+        conn.execute(
+            """
+            UPDATE masters_vendor
+            SET closing_day          = ?,
+                payment_month_offset = ?,
+                payment_day          = ?,
+                holiday_handling     = ?,
+                no_month_crossing    = ?,
+                updated_at           = datetime('now', 'localtime')
+            WHERE vendor_code = ?
+            """,
+            (
+                data.closing_day,
+                data.payment_month_offset,
+                data.payment_day,
+                data.holiday_handling,
+                data.no_month_crossing,
+                vendor_code,
+            )
+        )
+        conn.commit()
+        return {"status": "ok", "message": "支払条件を更新しました"}
+
+
 @router.post("/vendor")
 async def create_vendor(data: VendorCreate):
     """

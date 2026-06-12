@@ -102,7 +102,7 @@ def get_closing_date(transaction_date: date, closing_day: int) -> date:
     """
     y, m, d = transaction_date.year, transaction_date.month, transaction_date.day
 
-    if closing_day == 0:
+    if closing_day == 0 or closing_day == 99:
         # 末日締め: 取引月の末日が締日
         return get_last_day_of_month(y, m)
 
@@ -135,9 +135,9 @@ def calculate_expected_payment_date(
 
     Args:
         transaction_date: 取引日付
-        closing_day: 締日（0=末日, 1-31）
-        payment_month_offset: 締日基準の支払月数（1=締日翌月, 2=締日翌々月）
-        payment_day: 支払日（0=末日, 1-31）
+        closing_day: 締日（99=末日, 1-31）
+        payment_month_offset: 締日基準の支払月数（0=締日当月, 1=締日翌月, 2=締日翌々月）
+        payment_day: 支払日（99=末日, 1-31）
         holiday_handling: 休日考慮区分（"1"=休日前倒し, "2"=休日後倒し）
         holidays: 祝日セット（YYYY-MM-DD 文字列）
         no_month_crossing: True=後倒しで翌月になる場合は前倒しに切り替え
@@ -156,7 +156,7 @@ def calculate_expected_payment_date(
     payment_month_date = closing_date + relativedelta(months=payment_month_offset)
 
     # 3. 支払日を決定
-    if payment_day == 0:
+    if payment_day == 0 or payment_day == 99:
         # 末日払い
         expected = get_last_day_of_month(
             payment_month_date.year,

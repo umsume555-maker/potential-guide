@@ -10,18 +10,21 @@ class Reconciler:
 
     def _normalize_code(self, code) -> str:
         """
-        Normalize department code to string (remove .0, whitespace)
+        Normalize department code to string (remove .0, whitespace, zero-pad to 8 digits)
         """
         if code is None:
             return ""
         s = str(code).strip()
         try:
-            # Handle 20966520.0 case
+            # Handle 20966520.0 / 3101010.0 case
             f = float(s)
             if f.is_integer():
-                return str(int(f))
+                s = str(int(f))
         except:
             pass
+        # 8桁以下の数字コードは先頭ゼロでパディング（例: 3101010 → 03101010）
+        if s.isdigit() and len(s) < 8:
+            s = s.zfill(8)
         return s
 
     def reconcile(self, 
@@ -158,6 +161,11 @@ class Reconciler:
 
         for d_code, agg_data in aggregated_invoices.items():
             processed_depts.add(d_code) # Mark as processed
+            # 同じ請求書レコードの全候補部門コードも処理済みにする
+            # → DATE_DIFF で第1候補に紐づいた場合、第2候補が RECURRING_MISSING にならないよう防止
+            for _rec in agg_data["records"]:
+                for _cand in (_rec.candidate_dept_codes or []):
+                    processed_depts.add(self._normalize_code(_cand))
             
             amt = agg_data["raw_amount"]
             

@@ -153,6 +153,53 @@ async def update_synonyms(
     settings_repo.save_template(config)
     return {"status": "success", "message": msg}
 
+@router.get("/excluded_depts/{vendor_code}")
+async def get_excluded_depts(vendor_code: str):
+    """取引先の除外部門一覧を取得"""
+    config = settings_repo.get_template(vendor_code)
+    if not config:
+        return []
+    result = [
+        {"dept_code": code, "reason": reason}
+        for code, reason in config.excluded_dept_codes.items()
+    ]
+    return sorted(result, key=lambda x: x["dept_code"])
+
+
+@router.post("/excluded_depts")
+async def add_excluded_dept(
+    vendor_code: str = Form(...),
+    dept_code: str = Form(...),
+    reason: str = Form("")
+):
+    """除外部門を追加"""
+    config = settings_repo.get_template(vendor_code)
+    if not config:
+        raise HTTPException(status_code=400, detail="Template not found")
+    dept_code = dept_code.strip()
+    if not dept_code:
+        raise HTTPException(status_code=400, detail="部門コードが空です")
+    config.excluded_dept_codes[dept_code] = reason.strip()
+    config.last_updated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    settings_repo.save_template(config)
+    return {"status": "success", "message": f"除外部門 {dept_code} を追加しました"}
+
+
+@router.delete("/excluded_depts/{vendor_code}")
+async def delete_excluded_dept(vendor_code: str, dept_code: str):
+    """除外部門を削除"""
+    config = settings_repo.get_template(vendor_code)
+    if not config:
+        raise HTTPException(status_code=400, detail="Template not found")
+    dept_code = dept_code.strip()
+    if dept_code in config.excluded_dept_codes:
+        del config.excluded_dept_codes[dept_code]
+        config.last_updated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        settings_repo.save_template(config)
+        return {"status": "success", "message": f"除外部門 {dept_code} を削除しました"}
+    raise HTTPException(status_code=404, detail="除外部門が見つかりません")
+
+
 @router.post("/run")
 def run_reconcile(
     base_month: str = Form(...),
@@ -234,6 +281,12 @@ def run_reconcile(
         reconciler = Reconciler(master_repo)
         results = reconciler.reconcile(base_month, vendor_code, config.vendor_name, matched_records)
         log_step(f"Reconciliation complete: {len(results)} results")
+
+        # 5b. 除外部門フィルタリング
+        if config.excluded_dept_codes:
+            before_count = len(results)
+            results = [r for r in results if r.dept_code not in config.excluded_dept_codes]
+            log_step(f"Excluded dept filter: {before_count} -> {len(results)} results")
         
         # 6. Generate Excel
         log_step("Generating Excel...")
@@ -405,7 +458,15 @@ async def sync_sheet(
     
     try:
         detail_list = json.loads(details)
-        
+
+        # 現在の取引先の除外部門リストを読み込み
+        _vendor_config = settings_repo.get_template(vendor_code)
+        _excluded_in_sync = set(_vendor_config.excluded_dept_codes.keys()) if _vendor_config and _vendor_config.excluded_dept_codes else set()
+        if _excluded_in_sync:
+            before_len = len(detail_list)
+            detail_list = [item for item in detail_list if str(item.get("dept_code", "")).strip() not in _excluded_in_sync]
+            print(f"[SYNC_DEBUG] Excluded dept filter: {before_len} -> {len(detail_list)} items")
+
         # ファイルベースのデバッグログ
         import pathlib
         debug_log = pathlib.Path("sync_debug.log")
@@ -516,10 +577,15 @@ async def sync_sheet(
             with get_db() as conn:
                 targets = conn.execute("SELECT vendor_code, vendor_name FROM vendor_reconciliation_target").fetchall()
                 target_vendors = {r["vendor_code"]: r["vendor_name"] for r in targets}
-            
+
             for t_vcode, t_vname in target_vendors.items():
                 monthly_items = _calculate_monthly_status(t_vcode, base_month)
+                # 除外部門を除く
+                t_config = settings_repo.get_template(t_vcode)
+                t_excluded = set(t_config.excluded_dept_codes.keys()) if t_config and t_config.excluded_dept_codes else set()
                 for m_item in monthly_items:
+                    if m_item["dept_code"] in t_excluded:
+                        continue
                     # Only RECURRING_MISSING
                     # Or if (is_monthly="毎月") and (status is empty/missing) -> Implicitly RECURRING_MISSING
                     is_missing = False
@@ -688,9 +754,20 @@ def _calculate_monthly_status(vendor_code: str, base_month: str):
                     current_amounts[dc_norm] = r["payment_amount"]
                     current_statuses[dc_norm] = r["status"]
 
+        # 3b. 除外部門フィルタリング
+        excluded_dept_set = set()
+        try:
+            _cfg = settings_repo.get_template(vendor_code)
+            if _cfg and _cfg.excluded_dept_codes:
+                excluded_dept_set = set(_cfg.excluded_dept_codes.keys())
+        except Exception:
+            pass
+
         # 4. Build Result
         result = []
         for dc in dept_codes:
+            if dc in excluded_dept_set:
+                continue
             d = dc_orig_map.get(dc, {})
             dn = d.get("dept_name", "")
             is_monthly = "毎月" if monthly_flags.get(dc) else ""

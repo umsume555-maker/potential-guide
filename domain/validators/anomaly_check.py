@@ -288,10 +288,16 @@ def find_missing_vendors(
         cursor_exc = conn.execute("SELECT dept_code FROM masters_exception_dept")
         exception_depts = {r[0] for r in cursor_exc.fetchall()}
         print(f"[INFO] 例外部門数: {len(exception_depts)}")
-        
+
         cursor_exv = conn.execute("SELECT vendor_code FROM masters_exclude")
         excluded_vendors = {r[0] for r in cursor_exv.fetchall()}
         print(f"[INFO] 除外取引先数: {len(excluded_vendors)}")
+
+        # 請求一覧突合の対象取引先はスレモレチェック対象外
+        cursor_rec = conn.execute("SELECT vendor_code FROM vendor_reconciliation_target")
+        reconcile_targets = {r[0] for r in cursor_rec.fetchall()}
+        excluded_vendors |= reconcile_targets
+        print(f"[INFO] 請求一覧突合対象（スレモレ除外）: {len(reconcile_targets)}件")
     except Exception as e:
         print(f"[WARN] 除外リスト取得エラー: {e}")
     
@@ -328,19 +334,39 @@ def find_missing_vendors(
             
             has_gap_data = False
             try:
-                # 日付比較 (LIKE 'YYYY-MM%')
+                d_code_norm = normalize_dept_code(d_code)
+                # ① 翌月日付のデータがある（transaction_date による判定）
+                # ② または output_summary に「月ズレ？」「取引日付ズレ？」が既にある
+                # 部門コードは正規化前後の両方で検索
                 gap_cursor = conn.execute("""
-                    SELECT 1 FROM output_summary 
-                    WHERE vendor_code = ? 
-                      AND dept_code = ?
-                      AND transaction_date LIKE ?
-                      LIMIT 1
-                """, (v_code, d_code, f"{next_month}%"))
+                    SELECT 1 FROM output_summary o
+                    JOIN run_log rl ON o.run_id = rl.run_id
+                    WHERE o.vendor_code = ?
+                      AND (o.dept_code = ? OR o.dept_code = ?)
+                      AND rl.base_month = ?
+                      AND (
+                          o.anomaly_type IN ('月ズレ？', '取引日付ズレ？', 'DATE_GAP')
+                          OR o.transaction_date LIKE ?
+                      )
+                    LIMIT 1
+                """, (v_code, d_code, d_code_norm, base_month, f"{next_month}%"))
                 if gap_cursor.fetchone():
                     has_gap_data = True
             except Exception as e:
-                # テーブルがない場合など
-                pass
+                # テーブルがない場合など（run_logが存在しない等）
+                # フォールバック: 元のシンプルなクエリ
+                try:
+                    gap_cursor2 = conn.execute("""
+                        SELECT 1 FROM output_summary
+                        WHERE vendor_code = ?
+                          AND (dept_code = ? OR dept_code = ?)
+                          AND transaction_date LIKE ?
+                          LIMIT 1
+                    """, (v_code, d_code, normalize_dept_code(d_code), f"{next_month}%"))
+                    if gap_cursor2.fetchone():
+                        has_gap_data = True
+                except Exception:
+                    pass
             
             if has_gap_data:
                 # ズレとして扱われるため、モレにはしない
