@@ -1,13 +1,16 @@
-"""
+﻿"""
 CSV取込モジュール
 E2出力のCSVを読み込み、正規化してDBに格納
 """
 import csv
+import logging
 import re
 from pathlib import Path
 from typing import Iterator, Optional, Dict, List
 from dataclasses import dataclass, field
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 
 def normalize_dept_code(code: str) -> str:
@@ -173,7 +176,7 @@ def load_csv(file_path: Path, encoding: str = "cp932") -> Iterator[InputRow]:
         except Exception:
             continue
 
-    print(f"Loading CSV with encoding: {detected_enc}")
+    logger.info(f"Loading CSV with encoding: {detected_enc}")
 
     with open(file_path, encoding=detected_enc, errors="replace", newline="") as f:
         reader = csv.DictReader(f)
@@ -384,10 +387,10 @@ def load_vendor_master_csv(file_path: Path, encoding: str = "cp932") -> Iterator
                 break
         
         if idx_code == -1:
-            print("エラー: '取引先コード' カラムが見つかりません。ヘッダー:", header)
+            logger.warning(f"エラー: '取引先コード' カラムが見つかりません。ヘッダー: {header}")
             return
 
-        print(f"CSV読み込み開始: 取引先コード列={idx_code}, ヘッダー列数={len(header)}")
+        logger.info(f"CSV読み込み開始: 取引先コード列={idx_code}, ヘッダー列数={len(header)}")
         
         # 口座情報
         
@@ -412,7 +415,7 @@ def load_vendor_master_csv(file_path: Path, encoding: str = "cp932") -> Iterator
             
             # 重複チェック（既に処理済みのコードはスキップ）
             if vendor_code in seen_codes:
-                print(f"重複スキップ: {vendor_code}")
+                logger.debug(f"重複スキップ: {vendor_code}")
                 continue
             seen_codes.add(vendor_code)
             
@@ -473,7 +476,7 @@ def load_department_master_csv(file_path: Path, encoding: str = "cp932") -> Iter
         except Exception:
             continue
             
-    print(f"Loading Department CSV with encoding: {detected_enc}")
+    logger.info(f"Loading Department CSV with encoding: {detected_enc}")
 
     with open(file_path, encoding=detected_enc, errors="replace", newline="") as f:
         reader = csv.reader(f)
@@ -510,7 +513,7 @@ def load_department_master_csv(file_path: Path, encoding: str = "cp932") -> Iter
              if c_idx >= 0: IDX_CODE = c_idx
              if n_idx >= 0: IDX_NAME = n_idx
              if t_idx >= 0: IDX_TYPE = t_idx
-             print(f"Header Detected: Code={IDX_CODE}, Name={IDX_NAME}, Type={IDX_TYPE}")
+             logger.debug(f"Header Detected: Code={IDX_CODE}, Name={IDX_NAME}, Type={IDX_TYPE}")
 
         seen_codes = set()
         
@@ -641,7 +644,7 @@ def load_account_rule_csv(file_path: Path, encoding: str = "cp932") -> Iterator[
         
         if idx_vendor == -1 or idx_account == -1:
             # 必須列なし
-            print(f"必須列不足: header={header}")
+            logger.warning(f"必須列不足: header={header}")
             return
             
         for row in reader:
@@ -759,7 +762,7 @@ def load_vendor_rule_csv(file_path: Path, encoding: str = "cp932") -> Iterator[D
     if not detected_enc:
         detected_enc = "cp932" # Fallback
     
-    print(f"Loading Vendor Rule CSV with encoding: {detected_enc}")
+    logger.info(f"Loading Vendor Rule CSV with encoding: {detected_enc}")
     
     with open(file_path, encoding=detected_enc, errors="replace", newline="") as f:
         reader = csv.reader(f)
@@ -782,10 +785,10 @@ def load_vendor_rule_csv(file_path: Path, encoding: str = "cp932") -> Iterator[D
         idx_tax = get_idx(["税区分", "税区分コード", "税区分ｺｰﾄﾞ", "TaxCode", "Tax"])
         idx_gemini = get_idx(["AI", "Gemini", "ジェミニ", "AIフラグ"])
         
-        print(f"Header detected: vendor={idx_vendor}, cost={idx_cost}, sga={idx_sga}, any={idx_any}, tax={idx_tax}, gemini={idx_gemini}")
+        logger.debug(f"Header Detected: vendor={idx_vendor}, cost={idx_cost}, sga={idx_sga}, any={idx_any}, tax={idx_tax}, gemini={idx_gemini}")
         
         if idx_vendor == -1:
-            print(f"必須列不足: 取引先コードが見つかりません。header={header}")
+            logger.warning(f"必須列不足: 取引先コードが見つかりません。header={header}")
             return
             
         for row in reader:
@@ -884,10 +887,10 @@ def load_account_master_csv(file_path: Path, encoding: str = "cp932") -> Iterato
         idx_code = get_idx(["科目コード", "科目ｺｰﾄﾞ", "AccountCode", "勘定科目コード"])
         idx_name = get_idx(["科目名", "勘定科目名", "AccountName"])
         
-        print(f"Account Master Header: code={idx_code}, name={idx_name}, header={header}")
+        logger.debug(f"Account Master Header: code={idx_code}, name={idx_name}, header={header}")
         
         if idx_code == -1 or idx_name == -1:
-            print(f"必須列不足: 科目コード or 科目名が見つかりません")
+            logger.warning("必須列不足: 科目コード or 科目名が見つかりません")
             return
             
         for row in reader:
@@ -913,16 +916,18 @@ if __name__ == "__main__":
     test_path = Path(__file__).parent.parent / "ui_mock" / "入力ﾃﾞｰﾀｻﾝﾌﾟﾙ.csv"
     if test_path.exists():
         rows = list(load_csv(test_path))
-        print(f"読み込み行数: {len(rows)}")
+        logger.debug(f"読み込み行数: {len(rows)}")
         
         summaries = aggregate_by_base_invoice(iter(rows))
-        print(f"ベース伝票数: {len(summaries)}")
+        logger.debug(f"ベース伝票数: {len(summaries)}")
     
     # マスタテスト
     master_path = Path(__file__).parent.parent / "ui_mock" / "取引先(支払先出力).csv"
     if master_path.exists():
         vendors = list(load_vendor_master_csv(master_path))
-        print(f"マスタ読み込み件数: {len(vendors)}")
+        logger.debug(f"マスタ読み込み件数: {len(vendors)}")
         if vendors:
-            print(f"例: {vendors[0]}")
+            logger.debug(f"例: {vendors[0]}")
+
+
 

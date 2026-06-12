@@ -103,26 +103,6 @@ async def health_check():
     return {"status": "ok"}
 
 
-@app.get("/debug/creds")
-async def debug_creds():
-    """認証ファイル診断（一時エンドポイント）"""
-    import sqlite3
-    from infra.database import DATA_DIR, resolve_credentials_path, CREDENTIALS_PATH
-    db_path = DATA_DIR / "payment_check.db"
-    conn = sqlite3.connect(str(db_path))
-    stored = conn.execute("SELECT value FROM app_settings WHERE key='google_credentials_path'").fetchone()
-    conn.close()
-    stored_val = stored[0] if stored else None
-    resolved = resolve_credentials_path(stored_val)
-    return {
-        "db_stored": stored_val,
-        "resolved_path": str(resolved) if resolved else None,
-        "canonical_exists": CREDENTIALS_PATH.exists(),
-        "canonical_path": str(CREDENTIALS_PATH),
-        "sync_py_has_resolve": "resolve_credentials_path" in open("app/routers/sync.py", encoding="utf-8").read(),
-    }
-
-
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(

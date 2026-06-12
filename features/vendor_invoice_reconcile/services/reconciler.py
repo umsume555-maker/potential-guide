@@ -2,6 +2,7 @@ from typing import List, Dict, Tuple
 from collections import defaultdict
 from ..models import InvoiceRecord, ReconcileResult
 from ..repositories.master_repository import MasterRepository
+from infra.csv_loader import normalize_dept_code as _normalize_code
 
 class Reconciler:
     def __init__(self, master_repo: MasterRepository):
@@ -9,23 +10,7 @@ class Reconciler:
         self.dept_master = self.master_repo.get_department_master() # Cache for display
 
     def _normalize_code(self, code) -> str:
-        """
-        Normalize department code to string (remove .0, whitespace, zero-pad to 8 digits)
-        """
-        if code is None:
-            return ""
-        s = str(code).strip()
-        try:
-            # Handle 20966520.0 / 3101010.0 case
-            f = float(s)
-            if f.is_integer():
-                s = str(int(f))
-        except:
-            pass
-        # 8桁以下の数字コードは先頭ゼロでパディング（例: 3101010 → 03101010）
-        if s.isdigit() and len(s) < 8:
-            s = s.zfill(8)
-        return s
+        return _normalize_code(str(code) if code is not None else "")
 
     def reconcile(self, 
                   base_month: str, 

@@ -23,28 +23,3 @@ def overall_judgment(results: List[str]) -> str:
     if "-" in results:
         return "-"
     return "OK"
-
-
-def count_judgments(results: List[str]) -> dict:
-    """
-    判定結果を集計
-    
-    Args:
-        results: 各行の総合判定結果リスト
-    
-    Returns:
-        {"OK": n, "NG": n, "-": n}
-    """
-    counts = {"OK": 0, "NG": 0, "-": 0}
-    for r in results:
-        if r in counts:
-            counts[r] += 1
-    return counts
-
-
-if __name__ == "__main__":
-    # テスト
-    print(overall_judgment(["OK", "OK", "OK"]))  # OK
-    print(overall_judgment(["OK", "NG", "OK"]))  # NG
-    print(overall_judgment(["OK", "-", "OK"]))   # -
-    print(overall_judgment(["NG", "-", "OK"]))   # NG

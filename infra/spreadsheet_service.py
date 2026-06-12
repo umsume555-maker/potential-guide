@@ -1,5 +1,6 @@
-
+﻿
 import json
+import logging
 import gspread
 from pathlib import Path
 from typing import List, Dict, Optional
@@ -9,6 +10,8 @@ from infra.drive_service import DriveService
 from infra.csv_loader import normalize_dept_code
 from infra.retry_utils import call_with_retry
 import os
+
+logger = logging.getLogger(__name__)
 
 
 def _load_excluded_dept_map() -> Dict[str, set]:
@@ -28,7 +31,7 @@ def _load_excluded_dept_map() -> Dict[str, set]:
             if excluded:
                 result[vendor_code] = set(excluded.keys())
     except Exception as e:
-        print(f"[WARN] _load_excluded_dept_map エラー: {e}")
+        logger.warning(f"_load_excluded_dept_map エラー: {e}")
     return result
 
 
@@ -177,7 +180,7 @@ class SpreadsheetService:
                         
                 return filtered_rows
             except Exception as e:
-                print(f"[WARN] Failed to filter exception depts in Python: {e}")
+                logger.warning(f"Failed to filter exception depts in Python: {e}")
                 return rows
 
     def _setup_status_master(self, spreadsheet):
@@ -242,7 +245,7 @@ class SpreadsheetService:
                 ).fetchall()
             return {r[0]: {"link": r[1], "file_id": r[2]} for r in rows}
         except Exception as e:
-            print(f"[WARN] Failed to load drive_file_cache: {e}")
+            logger.warning(f"Failed to load drive_file_cache: {e}")
             return {}
 
     def _save_drive_cache(self, db_path: str, entries: list):
@@ -257,7 +260,7 @@ class SpreadsheetService:
                 """, entries)
                 conn.commit()
         except Exception as e:
-            print(f"[WARN] Failed to save drive_file_cache: {e}")
+            logger.warning(f"Failed to save drive_file_cache: {e}")
 
     def _ensure_drive_upload(self, db_rows, db_path, run_id):
         """未アップロードのファイルをDriveに上げ、リンクを更新する（キャッシュ + 逐次アップロード）"""
@@ -275,10 +278,10 @@ class SpreadsheetService:
                     """)
                     _c.commit()
             except Exception as _e:
-                print(f"[WARN] drive_file_cache table ensure failed: {_e}")
+                logger.warning(f"drive_file_cache table ensure failed: {_e}")
 
             cache = self._load_drive_cache(db_path)
-            print(f"[INFO] Drive cache: {len(cache)} files cached.")
+            logger.info(f"Drive cache: {len(cache)} files cached.")
 
             base_dir = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             zip_out_dir = base_dir / "invoice_ocr" / "ZIP_FILE_OUT"
@@ -325,7 +328,7 @@ class SpreadsheetService:
                             if local_path:
                                 items_to_upload.append((i, fname, local_path))
                             else:
-                                print(f"[WARN] File not found for __MULTI__ upload: {fname}")
+                                logger.warning(f"File not found for __MULTI__ upload: {fname}")
 
                     if not items_to_upload:
                         # 全てキャッシュ解決済み → 即座に更新
@@ -353,12 +356,12 @@ class SpreadsheetService:
                 # キャッシュになければアップロード対象
                 local_path = file_map.get(fname)
                 if not local_path:
-                    print(f"[WARN] File not found for upload: {fname}")
+                    logger.warning(f"File not found for upload: {fname}")
                     continue
 
                 to_upload.append((row, fname, local_path))
 
-            print(f"[INFO] Drive upload: cache_hits={cache_hits}, to_upload={len(to_upload)}, multi_pending={len(multi_pending)}")
+            logger.info(f"Drive upload: cache_hits={cache_hits}, to_upload={len(to_upload)}, multi_pending={len(multi_pending)}")
 
             if not to_upload and not multi_pending:
                 return
@@ -374,7 +377,7 @@ class SpreadsheetService:
                 folder_id = None
             if not folder_id:
                 folder_id = drive_service.ensure_folder("支払依頼チェックツール_証憑")
-            print(f"[INFO] Drive upload target folder_id: {folder_id}")
+            logger.info(f"Drive upload target folder_id: {folder_id}")
 
             # --- 逐次アップロード（Python 3.14 スレッド安定性のため）---
             new_cache_entries = []
@@ -382,7 +385,7 @@ class SpreadsheetService:
 
             for i, (row, fname, local_path) in enumerate(to_upload):
                 try:
-                    print(f"[INFO] Uploading ({i+1}/{len(to_upload)}): {fname}")
+                    logger.info(f"Uploading ({i+1}/{len(to_upload)}): {fname}")
                     uploaded = drive_service.upload_file(str(local_path), folder_id)
                     web_link = uploaded.get('webViewLink')
                     file_id = uploaded.get('id')
@@ -395,7 +398,7 @@ class SpreadsheetService:
                         if len(new_cache_entries) % 10 == 0:
                             self._save_drive_cache(db_path, new_cache_entries[-10:])
                 except Exception as e:
-                    print(f"[WARN] Upload failed for {fname}: {e}")
+                    logger.warning(f"Upload failed for {fname}: {e}")
 
             # --- __MULTI__ アップロード ---
             for row, resolved, items in multi_pending:
@@ -406,7 +409,7 @@ class SpreadsheetService:
                         resolved[idx] = already[1]
                         continue
                     try:
-                        print(f"[INFO] Uploading (multi): {fname}")
+                        logger.info(f"Uploading (multi): {fname}")
                         uploaded = drive_service.upload_file(str(local_path), folder_id)
                         web_link = uploaded.get('webViewLink')
                         file_id = uploaded.get('id')
@@ -414,10 +417,10 @@ class SpreadsheetService:
                             resolved[idx] = web_link
                             new_cache_entries.append((fname, web_link, file_id))
                     except Exception as e:
-                        print(f"[WARN] Upload failed for {fname}: {e}")
+                        logger.warning(f"Upload failed for {fname}: {e}")
                 row["ocr_file_link"] = "__MULTI__" + "|".join(resolved)
 
-            print(f"[INFO] Drive upload complete: {len(new_cache_entries)} new files uploaded.")
+            logger.info(f"Drive upload complete: {len(new_cache_entries)} new files uploaded.")
 
             # --- キャッシュ保存 ---
             self._save_drive_cache(db_path, new_cache_entries)
@@ -434,7 +437,7 @@ class SpreadsheetService:
                     conn.commit()
 
         except Exception as e:
-            print(f"[ERROR] Drive Upload Fatal Error: {e}")
+            logger.error(f"Drive Upload Fatal Error: {e}")
             import traceback
             traceback.print_exc()
 
@@ -450,7 +453,7 @@ class SpreadsheetService:
                 break
             except Exception as _e:
                 if _attempt < 2:
-                    print(f"[WARN] Sheets 接続失敗 (attempt {_attempt+1}/3): {_e} - 5秒後リトライ...")
+                    logger.warning(f"Sheets 接続失敗 (attempt {_attempt+1}/3): {_e} - 5秒後リトライ...")
                     _time.sleep(5)
                 else:
                     raise
@@ -466,7 +469,7 @@ class SpreadsheetService:
                 break
             except Exception as _e:
                 if _attempt < 2:
-                    print(f"[WARN] get_all_values 失敗 (attempt {_attempt+1}/3): {_e} - 5秒後リトライ...")
+                    logger.warning(f"get_all_values 失敗 (attempt {_attempt+1}/3): {_e} - 5秒後リトライ...")
                     _time.sleep(5)
                     client = self.authenticate()
                     sh = client.open_by_key(spreadsheet_id)
@@ -527,10 +530,10 @@ class SpreadsheetService:
 
         # 2. DBから最新データを取得
         db_rows = self.fetch_data_from_db(db_path, run_id)
-        print(f"[DEBUG] sync_to_sheet: run_id={run_id}, upload_drive={upload_drive}, rows={len(db_rows)}")
+        logger.debug(f"sync_to_sheet: run_id={run_id}, upload_drive={upload_drive}, rows={len(db_rows)}")
         
         if not db_rows:
-            print(f"[WARN] sync_to_sheet: No data found for run_id={run_id}")
+            logger.warning(f"sync_to_sheet: No data found for run_id={run_id}")
             return 0
             
         # --- Drive Upload Start ---
@@ -648,12 +651,12 @@ class SpreadsheetService:
             # 特例処理: Vendor Name 'None' fix & Recurring Missing amount clear
             vendor_val = str(row_data.get("取引先名", "")).strip()
             if vendor_val == "None":
-                print(f"[DEBUG] Found None vendor name at {key}. Replacing with ''.")
+                logger.debug(f"Found None vendor name at {key}. Replacing with ''.")
                 row_data["取引先名"] = ""
 
             status_check = row.get("status", "")
             if row.get("anomaly_type") == "毎月あるけど今月なし" or status_check == "RECURRING_MISSING":
-                print(f"[DEBUG] Found RECURRING_MISSING at {key}. Clearing amount.")
+                logger.debug(f"Found RECURRING_MISSING at {key}. Clearing amount.")
                 row_data["支払金額"] = ""
 
             # デフォルトステータス計算 (ユーザー要件: 2026/01/29)
@@ -740,10 +743,10 @@ class SpreadsheetService:
         needed_rows = len(output_data) + 10 # 余裕を持たせる
         try:
             if sheet.row_count < needed_rows:
-                print(f"[DEBUG] Resizing sheet from {sheet.row_count} to {needed_rows}")
+                logger.debug(f"Resizing sheet from {sheet.row_count} to {needed_rows}")
                 sheet.resize(rows=needed_rows)
         except Exception as e:
-            print(f"[WARN] Failed to resize sheet: {e}")
+            logger.warning(f"Failed to resize sheet: {e}")
 
         call_with_retry(
             sheet.update,
@@ -805,9 +808,9 @@ class SpreadsheetService:
                         {"requests": rich_requests},
                         max_retries=3, delay=10.0
                     )
-                    print(f"[INFO] Rich text applied to {len(rich_requests)} multi-link cells.")
+                    logger.info(f"Rich text applied to {len(rich_requests)} multi-link cells.")
             except Exception as e:
-                print(f"[WARN] Failed to apply rich text links: {e}")
+                logger.warning(f"Failed to apply rich text links: {e}")
 
         # 行数が減った場合、残骸を消す（行自体は残す）
         # prev: len(existing_records) + 1
@@ -1074,7 +1077,7 @@ class SpreadsheetService:
                 )
                 
             except Exception as e:
-                print(f"Format/Protect Error: {e}")
+                logger.warning(f"Format/Protect Error: {e}")
                 pass
 
         return len(new_records)
@@ -1115,13 +1118,13 @@ class SpreadsheetService:
                     break
                 except (ConnectionError, ConnectionResetError, OSError) as _e:
                     if _attempt < 2:
-                        print(f"[WARN] Site sheet 接続失敗 (attempt {_attempt+1}/3): {_e} - 5秒後リトライ...")
+                        logger.warning(f"Site sheet 接続失敗 (attempt {_attempt+1}/3): {_e} - 5秒後リトライ...")
                         _time.sleep(5)
                     else:
                         raise
                 except Exception as _e:
                     if _attempt < 2:
-                        print(f"[WARN] Site sheet 接続失敗 (attempt {_attempt+1}/3): {_e} - 5秒後リトライ...")
+                        logger.warning(f"Site sheet 接続失敗 (attempt {_attempt+1}/3): {_e} - 5秒後リトライ...")
                         _time.sleep(5)
                     else:
                         raise
@@ -1174,11 +1177,11 @@ class SpreadsheetService:
                                     continue
                                 # 「月ズレ？」が既にある場合は「もれ」を追加しない
                                 if key in gap_keys:
-                                    print(f"[INFO] モレ除外（月ズレ優先）: vendor={_v}, dept={_d}")
+                                    logger.info(f"モレ除外（月ズレ優先）: vendor={_v}, dept={_d}")
                                     continue
                                 # 除外部門チェック
                                 if str(m_row["dept_code"]).strip() in _excluded_dept_map.get(_v, set()) or _d in _excluded_dept_map.get(_v, set()):
-                                    print(f"[INFO] モレ除外（除外部門設定）: vendor={_v}, dept={_d}")
+                                    logger.info(f"モレ除外（除外部門設定）: vendor={_v}, dept={_d}")
                                     continue
 
                                 existing_keys.add(key)
@@ -1242,7 +1245,7 @@ class SpreadsheetService:
                                 ORDER BY o.dept_code
                             """, (base_month, base_month, base_month, base_month)).fetchall()
                             
-                            print(f"[INFO] 突合「もれ」候補: {len(reconcile_more)}件 (base_month={base_month})")
+                            logger.info(f"突合「もれ」候補: {len(reconcile_more)}件 (base_month={base_month})")
                             
                             reconcile_count = 0
                             for r_row in reconcile_more:
@@ -1252,15 +1255,15 @@ class SpreadsheetService:
                                 _rv = str(r_row[2]).strip()
                                 key = (_rd, _rv)
                                 if key in existing_keys:
-                                    print(f"[INFO]   スキップ(重複): dept={_rd}, vendor={_rv}")
+                                    logger.info(f"  スキップ(重複): dept={_rd}, vendor={_rv}")
                                     continue
                                 # 「月ズレ？」が既にある場合は「もれ」を追加しない
                                 if key in gap_keys:
-                                    print(f"[INFO]   スキップ(月ズレ優先): dept={_rd}, vendor={_rv}")
+                                    logger.info(f"  スキップ(月ズレ優先): dept={_rd}, vendor={_rv}")
                                     continue
                                 # 除外部門チェック
                                 if str(r_row[0]).strip() in _excluded_dept_map.get(_rv, set()) or _rd in _excluded_dept_map.get(_rv, set()):
-                                    print(f"[INFO]   スキップ(除外部門): dept={r_row[0]}, vendor={r_row[2]}")
+                                    logger.info(f"  スキップ(除外部門): dept={r_row[0]}, vendor={r_row[2]}")
                                     continue
                                 existing_keys.add(key)
                                 db_rows.append({
@@ -1273,13 +1276,13 @@ class SpreadsheetService:
                                     "anomaly_type": r_row[6]
                                 })
                                 reconcile_count += 1
-                                print(f"[INFO]   追加: dept={r_row[0]}, vendor={r_row[2]}, amt={r_row[4]}")
+                                logger.info(f"  追加: dept={r_row[0]}, vendor={r_row[2]}, amt={r_row[4]}")
                             if reconcile_count > 0:
-                                print(f"[INFO] 突合「もれ」データ追加: {reconcile_count}件")
+                                logger.info(f"突合「もれ」データ追加: {reconcile_count}件")
                             log["rows_reconcile_more_added"] = reconcile_count
                         except Exception as e2:
                             import traceback as tb2
-                            print(f"[ERROR] 突合もれデータ取得エラー: {e2}")
+                            logger.error(f"突合もれデータ取得エラー: {e2}")
                             tb2.print_exc()
             except Exception as e:
                 import traceback
@@ -1335,14 +1338,14 @@ class SpreadsheetService:
                                 _amt = 0
                             _vk = str(row.get("vendor_code", "")).strip()
                             if (_vk, _amt) in gap_vendor_amounts:
-                                print(f"[INFO] もれ抑制（月ズレ優先）: vendor={_vk}, dept={row.get('dept_code','')}, amt={_amt}")
+                                logger.info(f"もれ抑制（月ズレ優先）: vendor={_vk}, dept={row.get('dept_code','')}, amt={_amt}")
                                 continue
                         filtered_rows.append(row)
                     db_rows = filtered_rows
                     if len(db_rows) < before_len:
-                        print(f"[INFO] 月ズレ優先フィルタ: {before_len} → {len(db_rows)} 件")
+                        logger.info(f"月ズレ優先フィルタ: {before_len} → {len(db_rows)} 件")
             except Exception as _ef:
-                print(f"[WARN] 月ズレ優先フィルタエラー: {_ef}")
+                logger.warning(f"月ズレ優先フィルタエラー: {_ef}")
 
             # データが0件でもシートをクリアするために続行する
             if not db_rows:
@@ -1357,7 +1360,7 @@ class SpreadsheetService:
                     break
                 except Exception as _e:
                     if _attempt < 2:
-                        print(f"[WARN] site get_all_values 失敗 (attempt {_attempt+1}/3): {_e} - 5秒後リトライ...")
+                        logger.warning(f"site get_all_values 失敗 (attempt {_attempt+1}/3): {_e} - 5秒後リトライ...")
                         _time.sleep(5)
                         client = self.authenticate()
                         sh = client.open_by_key(site_sheet_id)
@@ -1734,3 +1737,4 @@ class SpreadsheetService:
             
         if requests:
             sh.batch_update({"requests": requests})
+

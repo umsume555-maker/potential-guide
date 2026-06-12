@@ -1,3 +1,4 @@
+﻿import logging
 from fastapi import APIRouter, File, UploadFile, Form, HTTPException
 from fastapi.responses import FileResponse
 from typing import List
@@ -5,6 +6,8 @@ import shutil
 from pathlib import Path
 from datetime import datetime
 import sqlite3
+
+logger = logging.getLogger(__name__)
 
 from features.vendor_invoice_reconcile.models import TemplateConfig, RunInfo
 from features.vendor_invoice_reconcile.repositories.settings_repository import SettingsRepository
@@ -213,7 +216,7 @@ def run_reconcile(
     
     def log_step(msg):
         elapsed = time.time() - start_time
-        print(f"[RECONCILE DEBUG] {elapsed:.2f}s - {msg}")
+        logger.debug(f"{elapsed:.2f}s - {msg}")
     
     log_step("Start reconcile")
     
@@ -397,11 +400,11 @@ def run_reconcile(
         
         # DEBUG: Check for Double Input in response
         di_count = sum(1 for d in details_list if d["status"] == "DOUBLE_INPUT")
-        print(f"[DEBUG_RUN] details_list has {len(details_list)} items. DoubleInput count: {di_count}")
+        logger.debug(f"details_list has {len(details_list)} items. DoubleInput count: {di_count}")
         if di_count > 0:
             for d in details_list:
                 if d["status"] == "DOUBLE_INPUT":
-                    print(f"[DEBUG_RUN]   -> DI Item: {d['dept_code']} {d['vendor_name']} {d['e2_amount']}")
+                    logger.debug(f"  -> DI Item: {d['dept_code']} {d['vendor_name']} {d['e2_amount']}")
 
         return {
             "status": "success", 
@@ -465,7 +468,7 @@ async def sync_sheet(
         if _excluded_in_sync:
             before_len = len(detail_list)
             detail_list = [item for item in detail_list if str(item.get("dept_code", "")).strip() not in _excluded_in_sync]
-            print(f"[SYNC_DEBUG] Excluded dept filter: {before_len} -> {len(detail_list)} items")
+            logger.debug(f"Excluded dept filter: {before_len} -> {len(detail_list)} items")
 
         # ファイルベースのデバッグログ
         import pathlib
@@ -475,7 +478,7 @@ async def sync_sheet(
             for i, item in enumerate(detail_list):
                 f.write(f"  item[{i}]: status={item.get('status','')}, anomaly_type={item.get('anomaly_type','')}, dept_code={item.get('dept_code','')}, tx_date={item.get('transaction_date', 'MISSING')}\n")
         
-        print(f"[DEBUG] sync_sheet received {len(detail_list)} items from frontend")
+        logger.debug(f"sync_sheet received {len(detail_list)} items from frontend")
         
         # === 「もれ」のみを抽出（現場シートに追記するため） ===
         more_rows = []
@@ -489,7 +492,7 @@ async def sync_sheet(
             anomaly_type = item.get("anomaly_type", "")
             status = item.get("status", "")
             
-            print(f"[SYNC_DEBUG] item: dept={d_code}, status={status}, anomaly_type_in={anomaly_type}")
+            logger.debug(f"item: dept={d_code}, status={status}, anomaly_type_in={anomaly_type}")
             
             if not anomaly_type:
                 if status == "MISSING": 
@@ -501,7 +504,7 @@ async def sync_sheet(
                 elif status == "DOUBLE_INPUT":
                     anomaly_type = "二重入力？"
             
-            print(f"[SYNC_DEBUG]   -> anomaly_type_out={anomaly_type}")
+            logger.debug(f"  -> anomaly_type_out={anomaly_type}")
             
             # 「もれ」または「毎月あるけど今月なし」または「月ズレ？」以外はスキップ
             # 文字化け対策: statusコードでも判定する
@@ -515,7 +518,7 @@ async def sync_sheet(
                 is_target = True
                 
             if not is_target:
-                print(f"[SYNC_DEBUG]   -> SKIPPED (not in allowed list)")
+                logger.debug(f"  -> SKIPPED (not in allowed list)")
                 continue
 
             # 「もれ」かつ金額0円はスキップ
@@ -526,10 +529,10 @@ async def sync_sheet(
                 except:
                     inv_amt_check = 0
                 if inv_amt_check == 0:
-                    print(f"[SYNC_DEBUG]   -> SKIPPED (もれ 0円)")
+                    logger.debug(f"  -> SKIPPED (もれ 0円)")
                     continue
 
-            print(f"[SYNC_DEBUG]   -> ACCEPTED")
+            logger.debug(f"  -> ACCEPTED")
             
             # 金額判定: ステータスに応じて参照する金額を変える
             # MISSING -> Invoice Amount (OCR)
@@ -608,11 +611,11 @@ async def sync_sheet(
                         }
                          more_rows.append(row)
         except Exception as e:
-            print(f"[WARN] Failed to add all target vendors monthly status: {e}")
+            logger.warning(f"Failed to add all target vendors monthly status: {e}")
             import traceback
             traceback.print_exc()
 
-        print(f"[SYNC_DEBUG] Total rows to merge: {len(more_rows)}")
+        logger.debug(f"Total rows to merge: {len(more_rows)}")
         
         if not more_rows:
             return {
@@ -630,11 +633,11 @@ async def sync_sheet(
         
         service = SpreadsheetServiceExt(credentials_path=creds_path)
         
-        print(f"[SYNC_DEBUG] credentials_path={creds_path}")
-        print(f"[SYNC_DEBUG] site_sheet_id={site_sheet_id}")
-        print(f"[SYNC_DEBUG] more_rows count={len(more_rows)}")
+        logger.debug(f"credentials_path={creds_path}")
+        logger.debug(f"site_sheet_id={site_sheet_id}")
+        logger.debug(f"more_rows count={len(more_rows)}")
         for i, row in enumerate(more_rows[:5]):
-            print(f"[SYNC_DEBUG]   row[{i}]: dept={row['dept_code']}, vendor={row['vendor_code']}, amt={row['payment_amount']}, anomaly={row['anomaly_type']}, status={row['status']}")
+            logger.debug(f"  row[{i}]: dept={row['dept_code']}, vendor={row['vendor_code']}, amt={row['payment_amount']}, anomaly={row['anomaly_type']}, status={row['status']}")
         
         result = service.sync_site_sheet(
             db_path=str(DB_PATH),
@@ -645,7 +648,7 @@ async def sync_sheet(
             merge_mode=True
         )
         
-        print(f"[DEBUG] sync_site_sheet result: {result}")
+        logger.debug(f"sync_site_sheet result: {result}")
         
         # エラーチェック: sync_site_sheetが失敗した場合はユーザーに通知
         if result.get("status") == "error":
@@ -916,4 +919,6 @@ def delete_target_vendor(vendor_code: str):
             """)
             conn.commit()
             return {"status": "success"}
+
+
 

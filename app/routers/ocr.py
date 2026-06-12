@@ -1,4 +1,5 @@
-# app/routers/ocr.py
+﻿# app/routers/ocr.py
+import logging
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, File, UploadFile, Form
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
@@ -9,6 +10,8 @@ import os
 import shutil
 import zipfile
 import threading
+
+logger = logging.getLogger(__name__)
 
 from infra.database import DB_PATH
 from domain.services.invoice_match_service import InvoiceMatchService
@@ -72,7 +75,7 @@ def _list_zip_approval_nos(zip_path: Path) -> list:
                 if parts[0]:
                     approval_nos.add(parts[0])
     except Exception as e:
-        print(f"[WARN] _list_zip_approval_nos error ({zip_path.name}): {e}")
+        logger.warning(f"_list_zip_approval_nos error ({zip_path.name}): {e}")
     return list(approval_nos)
 
 
@@ -90,7 +93,7 @@ def _get_zip_log() -> dict:
             cursor = conn.execute("SELECT zip_filename, zip_size FROM ocr_zip_log")
             return {row[0]: row[1] for row in cursor.fetchall()}
     except Exception as e:
-        print(f"[WARN] _get_zip_log error: {e}")
+        logger.warning(f"_get_zip_log error: {e}")
         return {}
 
 
@@ -105,9 +108,9 @@ def _update_zip_log(process_zip_files: list):
                 VALUES (?, ?, datetime('now', 'localtime'))
             """, [(zf.name, zf.stat().st_size) for zf in process_zip_files if zf.exists()])
             conn.commit()
-        print(f"[INFO] ocr_zip_log 更新: {len(process_zip_files)} 件")
+        logger.info(f"ocr_zip_log 更新: {len(process_zip_files)} 件")
     except Exception as e:
-        print(f"[WARN] _update_zip_log error: {e}")
+        logger.warning(f"_update_zip_log error: {e}")
 
 
 def _copy_results_for_skip_zips(run_id: str, skip_approval_nos: list):
@@ -127,7 +130,7 @@ def _copy_results_for_skip_zips(run_id: str, skip_approval_nos: list):
             """, skip_approval_nos + [run_id])
             row = cursor.fetchone()
             if not row:
-                print(f"[INFO] スキップZIPの前回結果なし（初回実行）")
+                logger.info(f"スキップZIPの前回結果なし（初回実行）")
                 return
             prev_run_id = row[0]
 
@@ -153,9 +156,9 @@ def _copy_results_for_skip_zips(run_id: str, skip_approval_nos: list):
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, [[run_id] + list(r) for r in rows])
             conn.commit()
-            print(f"[INFO] スキップ結果コピー: {len(rows)} 件 (from {prev_run_id})")
+            logger.info(f"スキップ結果コピー: {len(rows)} 件 (from {prev_run_id})")
     except Exception as e:
-        print(f"[WARN] _copy_results_for_skip_zips error: {e}")
+        logger.warning(f"_copy_results_for_skip_zips error: {e}")
 
 
 def _safe_rmtree(target: Path):
@@ -169,16 +172,16 @@ def _safe_rmtree(target: Path):
                 item.rmdir()
         except PermissionError:
             skipped += 1
-            print(f"[WARN] 使用中のためスキップ: {item.name}")
+            logger.warning(f"使用中のためスキップ: {item.name}")
         except Exception as e:
             skipped += 1
-            print(f"[WARN] 削除失敗 ({type(e).__name__}): {item.name}")
+            logger.warning(f"削除失敗 ({type(e).__name__}): {item.name}")
     try:
         target.rmdir()
     except Exception:
         pass
     if skipped:
-        print(f"[WARN] スキップしたファイル数: {skipped} 件（使用中のため）")
+        logger.warning(f"スキップしたファイル数: {skipped} 件（使用中のため）")
 
 
 def _archive_extracted_files(zip_out_path: Path, archive_path: Path, zip_file: Path):
@@ -210,10 +213,10 @@ def _archive_extracted_files(zip_out_path: Path, archive_path: Path, zip_file: P
                         shutil.copy2(src_file, dest_file)
                         copied += 1
                     except Exception as ce:
-                        print(f"[WARN] archive copy failed: {src_file.name} - {ce}")
-        print(f"[INFO] PDF_ARCHIVE コピー完了: {copied} ファイル ({len(approval_nos)} 承認番号)")
+                        logger.warning(f"archive copy failed: {src_file.name} - {ce}")
+        logger.info(f"PDF_ARCHIVE コピー完了: {copied} ファイル ({len(approval_nos)} 承認番号)")
     except Exception as e:
-        print(f"[WARN] _archive_extracted_files error: {e}")
+        logger.warning(f"_archive_extracted_files error: {e}")
 
 
 def _extract_zip(zip_file: Path, out_path: Path):
@@ -229,10 +232,10 @@ def _extract_zip(zip_file: Path, out_path: Path):
                     extracted += 1
                 except Exception as fe:
                     failed += 1
-                    print(f"[WARN] Skip file in {zip_file.name}: {ascii(info.filename)} ({type(fe).__name__})")
-        print(f"[INFO] Extracted: {zip_file.name} (ok={extracted}, skip={failed})")
+                    logger.warning(f"Skip file in {zip_file.name}: {ascii(info.filename)} ({type(fe).__name__})")
+        logger.info(f"Extracted: {zip_file.name} (ok={extracted}, skip={failed})")
     except Exception as e:
-        print(f"[ERROR] Failed to extract {zip_file.name}: {type(e).__name__}: {ascii(str(e))}")
+        logger.error(f"Failed to extract {zip_file.name}: {type(e).__name__}: {ascii(str(e))}")
 
 
 # ──────────────────────────────────────────
@@ -275,8 +278,8 @@ async def analyze_invoices(
             content = await file.read()
             with open(save_path, "wb") as f:
                 f.write(content)
-            print(f"[INFO] ZIP uploaded: {file.filename} ({len(content):,} bytes)")
-        print(f"[INFO] 合計 {len(uploaded)} 件のZIPをアップロードしました")
+            logger.info(f"ZIP uploaded: {file.filename} ({len(content):,} bytes)")
+        logger.info(f"合計 {len(uploaded)} 件のZIPをアップロードしました")
 
     # 1. ZIP_FILE_IN のZIPファイル一覧を取得
     zip_files = list(zip_in_path.glob("*.zip")) if zip_in_path.exists() else []
@@ -297,7 +300,7 @@ async def analyze_invoices(
 
     skip_count = len(skip_zips)
     process_count = len(process_zips)
-    print(f"[INFO] 差分判定: スキップ={skip_count}件, 処理={process_count}件")
+    logger.info(f"差分判定: スキップ={skip_count}件, 処理={process_count}件")
 
     # PDF永続アーカイブパス（OCR解析実行時に削除されない永続保管場所）
     pdf_archive_path = base_dir / "invoice_ocr" / "PDF_ARCHIVE"
@@ -311,16 +314,16 @@ async def analyze_invoices(
             if zip_out_path.exists():
                 try:
                     shutil.rmtree(zip_out_path)
-                    print(f"[INFO] ZIP_FILE_OUT クリア（全件再処理）")
+                    logger.info(f"ZIP_FILE_OUT クリア（全件再処理）")
                 except PermissionError as e:
                     # ファイルが別プロセスに使用中の場合は個別削除にフォールバック
-                    print(f"[WARN] rmtree失敗（使用中ファイルあり）、個別削除に切り替え: {e}")
+                    logger.warning(f"rmtree失敗（使用中ファイルあり）、個別削除に切り替え: {e}")
                     _safe_rmtree(zip_out_path)
-                    print(f"[INFO] ZIP_FILE_OUT 個別削除完了")
+                    logger.info(f"ZIP_FILE_OUT 個別削除完了")
             with sqlite3.connect(DB_PATH) as conn:
                 conn.execute("DELETE FROM invoice_ocr_results")
                 conn.commit()
-                print(f"[INFO] invoice_ocr_results クリア（全件再処理）")
+                logger.info(f"invoice_ocr_results クリア（全件再処理）")
         else:
             # 差分あり → ZIP_FILE_OUT は保持、スキップZIPの結果をコピー
             # スキップZIPの承認番号をZIP内容から取得（展開不要）
@@ -328,7 +331,7 @@ async def analyze_invoices(
             for zf in skip_zips:
                 nos = _list_zip_approval_nos(zf)
                 skip_approval_nos.extend(nos)
-                print(f"[INFO] スキップ: {zf.name} ({len(nos)}フォルダ)")
+                logger.info(f"スキップ: {zf.name} ({len(nos)}フォルダ)")
 
             # 前回の結果を現在のrun_idにコピー
             _copy_results_for_skip_zips(run_id, skip_approval_nos)
@@ -341,7 +344,7 @@ async def analyze_invoices(
         _extract_zip(zf, zip_out_path)
         _archive_extracted_files(zip_out_path, pdf_archive_path, zf)
         os.remove(zf)
-        print(f"[INFO] Deleted: {zf.name}")
+        logger.info(f"Deleted: {zf.name}")
 
     # スキップZIPも ZIP_FILE_IN から削除
     for zf in skip_zips:
@@ -377,7 +380,7 @@ async def analyze_invoices(
 
     mode = "差分解析" if skip_count > 0 else "全件解析"
     msg = f"{mode}開始: 新規/変更={process_count}件, スキップ={skip_count}件"
-    print(f"[INFO] OCR thread started: run_id={run_id}, fast={fast}, {msg}")
+    logger.info(f"OCR thread started: run_id={run_id}, fast={fast}, {msg}")
 
     return {
         "message": msg,
@@ -539,7 +542,7 @@ async def get_invoice_file_by_approval(approval_no: str, filename: str):
     if not found_path:
         found_path = _find_in(base_dir / "invoice_ocr" / "PDF_ARCHIVE")
         if found_path:
-            print(f"[INFO] PDF_ARCHIVEから提供: {approval_no}/{filename}")
+            logger.info(f"PDF_ARCHIVEから提供: {approval_no}/{filename}")
 
     if not found_path or not found_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
@@ -583,3 +586,4 @@ def _get_latest_run_id():
         cursor = conn.execute("SELECT run_id FROM run_log ORDER BY started_at DESC LIMIT 1")
         row = cursor.fetchone()
         return row[0] if row else None
+

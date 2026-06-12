@@ -1,10 +1,10 @@
 import sqlite3
 import gspread
 from pathlib import Path
-from oauth2client.service_account import ServiceAccountCredentials
 from typing import List, Dict, Optional
 from datetime import datetime
 from infra.retry_utils import call_with_retry
+from infra.spreadsheet_service import SpreadsheetService
 
 class SpreadsheetServiceExt:
     """拡張スプレッドシートサービス（突合用）"""
@@ -15,18 +15,8 @@ class SpreadsheetServiceExt:
         else:
             # Default path
             self.credentials_path = Path(__file__).parent.parent / "data" / "credentials.json"
-        self.scope = [
-            "https://spreadsheets.google.com/feeds",
-            "https://www.googleapis.com/auth/drive"
-        ]
-        
     def authenticate(self) -> gspread.Client:
-        if not self.credentials_path.exists():
-            raise FileNotFoundError(f"Credential file not found: {self.credentials_path}")
-
-        # ConnectionError 時は最大3回リトライ
-        creds = ServiceAccountCredentials.from_json_keyfile_name(str(self.credentials_path), self.scope)
-        return call_with_retry(gspread.authorize, creds, max_retries=3, delay=5.0)
+        return SpreadsheetService(str(self.credentials_path)).authenticate()
 
     def sync_site_sheet(self, db_path: str, run_id: str, site_sheet_id: str, site_dept_codes: List[str], overrides: Dict[tuple, str] = None, site_rows: List[Dict] = None, merge_mode: bool = False) -> Dict[str, str]:
         """
