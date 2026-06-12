@@ -66,7 +66,6 @@ class InvoiceSummary:
     account_code: str            # 最小枝番の科目
     account_name: str
     detail_count: int            # 明細数
-    detail_count: int            # 明細数
     assignee: str = ""           # 担当
     details: list = field(default_factory=list)
 
@@ -106,17 +105,6 @@ def get_yyyymm(date_str: str) -> str:
     return ""
 
 
-def load_csv(file_path: Path, encoding: str = "cp932") -> Iterator[InputRow]:
-    """
-    CSVファイルを読み込んでInputRowを生成
-    
-    Args:
-        file_path: CSVファイルパス
-        encoding: 文字エンコーディング（デフォルト: cp932）
-    
-    Yields:
-        InputRow: 1行ずつのデータ
-    """
 @dataclass
 class CsvDiagnostics:
     """CSV診断情報"""

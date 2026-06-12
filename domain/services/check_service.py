@@ -27,7 +27,7 @@ def _get_server_base_url() -> str:
         pass
     return "http://localhost:8000"
 
-from infra.database import get_db, init_database
+from infra.database import get_db, init_database, DB_PATH
 from domain.services.result_saver import save_results as _save_results_func
 from infra.csv_loader import (
     load_csv, aggregate_by_base_invoice, 
@@ -609,7 +609,7 @@ class CheckService:
                 run_info["dist_account"] = str(get_top_dist("account_code"))
                 
                 # 4. DBパス
-                run_info["db_path"] = str(init_database.__globals__.get('DB_PATH', ''))
+                run_info["db_path"] = str(DB_PATH)
                 
                 
                 excel_path = write_excel(
