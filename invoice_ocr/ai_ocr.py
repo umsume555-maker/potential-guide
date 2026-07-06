@@ -159,6 +159,72 @@ def ocr_image_with_gemini(image_path: Path, api_key: str, model: str = "gemini-2
         return "", 0.0
 
 
+def detect_pdf_rotation_with_gemini(pdf_path: Path, api_key: str, model: str = "gemini-2.0-flash") -> Optional[list]:
+    """GeminiにPDFを直接送信し、各ページを正立化するための回転角度を取得する。
+
+    pdf2image / Poppler / Tesseract に依存しない（PDFはGeminiにそのままアップロード）。
+
+    Returns:
+        list[int]: 各ページの回転角度（0/90/180/270 のいずれか、時計回り）
+                  失敗時は None
+    """
+    import json
+    import re
+
+    try:
+        import google.generativeai as genai
+    except ImportError:
+        return None
+
+    uploaded = None
+    try:
+        genai.configure(api_key=api_key)
+        uploaded = genai.upload_file(str(pdf_path), mime_type="application/pdf")
+
+        model_inst = genai.GenerativeModel(model)
+        prompt = (
+            "このPDFの各ページについて、文字が正立して読める向きにするために"
+            "ページを時計回りに何度回転すれば良いかを判定してください。\n\n"
+            "回転角度は 0, 90, 180, 270 のいずれかです。\n"
+            "0  = すでに正立している\n"
+            "90 = 文字が左横向き（時計回り90度で正立）\n"
+            "180= 上下逆さま\n"
+            "270= 文字が右横向き（時計回り270度で正立）\n\n"
+            "出力は純粋なJSON配列のみで、各要素がページ順の回転角度です。\n"
+            "例: [0, 90, 0]\n\n"
+            "```json などの装飾は付けず、JSON配列のみを返してください。"
+        )
+
+        response = model_inst.generate_content([prompt, uploaded])
+        text = (response.text or "").strip()
+        text = re.sub(r"```json\s*", "", text)
+        text = re.sub(r"```\s*", "", text)
+        text = text.strip()
+
+        result = json.loads(text)
+        if not isinstance(result, list):
+            return None
+        normalized = []
+        for x in result:
+            try:
+                v = int(x) % 360
+            except (TypeError, ValueError):
+                return None
+            if v not in (0, 90, 180, 270):
+                return None
+            normalized.append(v)
+        return normalized
+    except Exception as e:
+        print(f"[WARN] Gemini rotation detect failed for {pdf_path.name}: {e}")
+        return None
+    finally:
+        if uploaded is not None:
+            try:
+                genai.delete_file(uploaded.name)
+            except Exception:
+                pass
+
+
 def extract_billing_amount_with_gemini(pdf_path: Path, api_key: str, model: str = "gemini-2.0-flash") -> tuple[dict, float]:
     """
     請求書PDFから「当月請求額」を抽出する

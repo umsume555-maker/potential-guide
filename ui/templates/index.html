@@ -39,9 +39,26 @@
           </div>
           <div class="bd" style="padding: 30px; text-align: center;">
             <p style="margin-bottom: 20px; color: var(--muted);">
-              ZIPフォルダ内の請求書をOCR解析し、結果をExcelでダウンロードできます。
+              請求書のZIPファイルを選択して解析を実行してください。
             </p>
-            <div style="display: flex; gap: 15px; justify-content: center;">
+
+            <!-- ZIPファイル選択エリア -->
+            <div id="ocrDropZone" style="margin-bottom: 20px; padding: 24px 16px; border: 2px dashed var(--line); border-radius: 8px; background: var(--bg-secondary); text-align: center; cursor: pointer; transition: border-color 0.2s, background 0.2s;"
+              onclick="document.getElementById('ocrZipFile').click()">
+              <label style="display:block; margin-bottom: 8px; font-weight: bold; pointer-events:none;">📁 請求書ZIPファイル</label>
+              <input type="file" id="ocrZipFile" accept=".zip" multiple
+                style="display:none;">
+              <div style="display: flex; gap: 10px; justify-content: center; align-items: center; flex-wrap: wrap;">
+                <button type="button" class="secondary" id="btnSelectOcrZip"
+                  style="padding: 8px 20px;"
+                  onclick="event.stopPropagation(); document.getElementById('ocrZipFile').click()">
+                  📂 ZIPを選択
+                </button>
+                <span id="ocrZipFileName" style="color: var(--muted); font-size: 0.9em;">ファイル未選択 / ここにZIPをドロップ</span>
+              </div>
+            </div>
+
+            <div style="display: flex; gap: 15px; justify-content: center; flex-wrap: wrap;">
               <button class="primary" id="btnRunOCR" style="font-size: 1.1em; padding: 12px 30px;" title="Geminiで傾き補正あり（時間がかかります）">
                 ▶ 解析実行
               </button>
@@ -53,6 +70,7 @@
               </button>
             </div>
             <p id="ocrStatusMsg" style="margin-top: 15px; color: var(--muted); font-size: 0.9em;"></p>
+
           </div>
         </section>
 
@@ -301,6 +319,52 @@
                   <tbody id="monthlyStatusBody"></tbody>
                 </table>
               </details>
+            </div>
+          </div>
+        </section>
+
+        <!-- Excluded Dept Management -->
+        <section class="card">
+          <div class="hd">
+            <h2>🚫 除外部門管理（取引先別）</h2>
+          </div>
+          <div class="bd">
+            <p class="hint">
+              指定した部門コードを、請求一覧突合の結果・現場シートの「もれ」から除外します。<br>
+              例: チェック実行対象外の部門（営業経理グループ等）を設定することで、誤検知を防止できます。
+            </p>
+
+            <div class="row" style="margin-bottom:10px; gap:10px; align-items:flex-end;">
+              <div style="flex:2">
+                <label>取引先</label>
+                <select id="excludedDeptVendorSelect" style="width:100%;">
+                  <option value="">取引先を選択...</option>
+                </select>
+              </div>
+              <button class="secondary sm" id="btnLoadExcludedDepts">読込</button>
+            </div>
+
+            <div id="excludedDeptsPanel" style="display:none;">
+              <div class="row" style="margin-bottom:10px; gap:10px; flex-wrap:wrap;">
+                <input type="text" id="newExcludedDeptCode" placeholder="部門コード (例: 03101100)" style="width:160px;">
+                <input type="text" id="newExcludedDeptReason" placeholder="理由 (例: チェック実行対象外)" style="flex:1; min-width:160px;">
+                <button class="primary sm" id="btnAddExcludedDept">追加</button>
+              </div>
+
+              <div style="max-height:250px; overflow-y:auto;">
+                <table class="list-table sm">
+                  <thead>
+                    <tr>
+                      <th>部門コード</th>
+                      <th>理由</th>
+                      <th style="width:70px; text-align:center;">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="excludedDeptsBody">
+                    <tr><td colspan="3" style="text-align:center; color:var(--muted)">取引先を選択してください</td></tr>
+                  </tbody>
+                </table>
+              </div>
             </div>
           </div>
         </section>
@@ -787,6 +851,55 @@
               <div class="hint" style="margin-top:4px; font-size:0.78em;">※ラベルを削除すると全取引先の紐付きも削除されます</div>
             </div>
 
+            <!-- 5. 支払条件 -->
+            <div class="sub-card" style="margin-top:10px;" id="paymentConditionSection">
+              <h3>⑤ 支払条件（締日・支払日）</h3>
+              <div class="row" style="gap:10px; flex-wrap:wrap;">
+                <div style="flex:1; min-width:90px;">
+                  <label class="sm">締日</label>
+                  <div style="display:flex; align-items:center; gap:4px;">
+                    <input type="number" id="editClosingDay" min="0" max="99" style="width:60px;" placeholder="99">
+                    <span class="hint" style="font-size:0.75em;">日 (99=末)</span>
+                  </div>
+                </div>
+                <div style="flex:1; min-width:90px;">
+                  <label class="sm">支払月オフセット</label>
+                  <div style="display:flex; align-items:center; gap:4px;">
+                    <input type="number" id="editPaymentMonthOffset" min="0" max="6" style="width:60px;" placeholder="1">
+                    <span class="hint" style="font-size:0.75em;">ヶ月後</span>
+                  </div>
+                </div>
+                <div style="flex:1; min-width:90px;">
+                  <label class="sm">支払日</label>
+                  <div style="display:flex; align-items:center; gap:4px;">
+                    <input type="number" id="editPaymentDay" min="0" max="99" style="width:60px;" placeholder="99">
+                    <span class="hint" style="font-size:0.75em;">日 (99=末)</span>
+                  </div>
+                </div>
+                <div style="flex:1.2; min-width:110px;">
+                  <label class="sm">休日処理</label>
+                  <select id="editHolidayHandling" style="width:100%;">
+                    <option value="1">前倒し（休日前）</option>
+                    <option value="2">後倒し（休日後）</option>
+                  </select>
+                </div>
+                <div style="flex:1; min-width:90px;">
+                  <label class="sm">月跨ぎ不可</label>
+                  <select id="editNoMonthCrossing" style="width:100%;">
+                    <option value="0">許可</option>
+                    <option value="1">不可</option>
+                  </select>
+                </div>
+              </div>
+              <div style="margin-top:8px; display:flex; align-items:center; gap:10px;">
+                <button type="button" class="primary sm" id="btnSavePaymentCondition">保存</button>
+                <span id="paymentConditionMsg" style="font-size:0.85em; color:var(--muted);"></span>
+              </div>
+              <div class="hint" style="margin-top:4px; font-size:0.78em;">
+                ※ 期待支払日 = 締日が属する締め期間の締日 + オフセット月 → 支払日 → 休日調整
+              </div>
+            </div>
+
             <!-- 3. 勘定科目マスタ登録 (新規) -->
             <div class="sub-card" style="margin-top:15px; border-top:1px dashed #555; padding-top:15px;">
               <h3>③ 勘定科目マスタ登録 (手動)</h3>
@@ -894,10 +1007,12 @@
                   <label style="font-size:0.9em;">Model A (高速・低コスト / デフォルト)</label>
                   <select id="settingModelA"
                     style="width:100%; padding:8px; background:var(--bg-secondary); color:var(--text); border:1px solid #555; border-radius:4px;">
-                    <option value="gemini-3-flash-preview">gemini-3-flash-preview (Gemini 3 高速)</option>
-                    <option value="gemini-2.0-flash-exp">gemini-2.0-flash-exp (Gemini 2 実験版)</option>
-                    <option value="gemini-1.5-flash">gemini-1.5-flash (Gemini 1.5 安定版・高速)</option>
-                    <option value="gemini-1.5-pro">gemini-1.5-pro (Gemini 1.5 安定版・高精度)</option>
+                    <option value="gemini-2.5-flash-preview-04-17">gemini-2.5-flash-preview-04-17 (Gemini 2.5 Flash 高速・推奨)</option>
+                    <option value="gemini-2.0-flash">gemini-2.0-flash (Gemini 2.0 Flash 安定版)</option>
+                    <option value="gemini-2.0-flash-lite">gemini-2.0-flash-lite (Gemini 2.0 Flash Lite 軽量版)</option>
+                    <option value="gemini-2.0-flash-exp">gemini-2.0-flash-exp (Gemini 2.0 実験版)</option>
+                    <option value="gemini-1.5-flash">gemini-1.5-flash (Gemini 1.5 Flash)</option>
+                    <option value="gemini-1.5-pro">gemini-1.5-pro (Gemini 1.5 Pro)</option>
                   </select>
                   <div style="font-size:0.8em; color:var(--muted)">フラグ「1」または指定がない場合に使用されます。</div>
                 </div>
@@ -905,11 +1020,12 @@
                   <label style="font-size:0.9em;">Model B (高精度・高コスト)</label>
                   <select id="settingModelB"
                     style="width:100%; padding:8px; background:var(--bg-secondary); color:var(--text); border:1px solid #555; border-radius:4px;">
-                    <option value="gemini-3-pro-preview">gemini-3-pro-preview (Gemini 3 高精度)</option>
-                    <option value="gemini-3-flash-preview">gemini-3-flash-preview (Gemini 3 高速)</option>
-                    <option value="gemini-1.5-pro">gemini-1.5-pro (Gemini 1.5 安定版・高精度)</option>
-                    <option value="gemini-2.0-flash-exp">gemini-2.0-flash-exp (Gemini 2 実験版)</option>
-                    <option value="gemini-1.5-flash">gemini-1.5-flash (Gemini 1.5 安定版・高速)</option>
+                    <option value="gemini-2.5-pro-preview-05-06">gemini-2.5-pro-preview-05-06 (Gemini 2.5 Pro 高精度・推奨)</option>
+                    <option value="gemini-2.5-flash-preview-04-17">gemini-2.5-flash-preview-04-17 (Gemini 2.5 Flash 高速)</option>
+                    <option value="gemini-2.0-flash">gemini-2.0-flash (Gemini 2.0 Flash 安定版)</option>
+                    <option value="gemini-2.0-flash-exp">gemini-2.0-flash-exp (Gemini 2.0 実験版)</option>
+                    <option value="gemini-1.5-pro">gemini-1.5-pro (Gemini 1.5 Pro)</option>
+                    <option value="gemini-1.5-flash">gemini-1.5-flash (Gemini 1.5 Flash)</option>
                   </select>
                   <div style="font-size:0.8em; color:var(--muted)">フラグ「2」の場合に使用されます（精度重視）。</div>
                 </div>
@@ -1001,6 +1117,18 @@
 
   <!-- 担当割当タブ (Assignment) -->
   <div id="tab-assignment" class="tab-pane">
+
+    <!-- 担当2操作ボタン -->
+    <div style="margin-bottom: 12px; padding: 12px 16px; background: var(--bg-secondary); border-radius: 8px; border: 1px solid var(--line); display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+      <button type="button" class="secondary" id="btnCopyToAssignee2" style="padding: 8px 20px;">
+        📋 担当1 → 担当2 にコピー
+      </button>
+      <button type="button" class="primary" id="btnPushAssignee2" style="padding: 8px 20px;">
+        📤 担当2をスプシに反映
+      </button>
+      <span id="assignee2CopyMsg" style="font-size: 0.9em; color: var(--muted);"></span>
+    </div>
+
     <div class="row">
       <!-- 部門担当一覧 -->
       <section class="card" style="flex:1">
@@ -1018,12 +1146,13 @@
                 <tr>
                   <th>部門コード</th>
                   <th>部門名</th>
-                  <th>担当者(Click to Edit)</th>
+                  <th>担当</th>
+                  <th>担当2（今月）</th>
                 </tr>
               </thead>
               <tbody id="assignDeptBody">
                 <tr>
-                  <td colspan="3" class="loading">Loading...</td>
+                  <td colspan="4" class="loading">Loading...</td>
                 </tr>
               </tbody>
             </table>
@@ -1053,18 +1182,18 @@
                 <tr>
                   <th>取引先コード</th>
                   <th>取引先名</th>
-                  <th>担当者(Click to Edit)</th>
+                  <th>担当</th>
+                  <th>担当2（今月）</th>
                 </tr>
               </thead>
               <tbody id="assignVendorBody">
                 <tr>
-                  <td colspan="3" class="loading">Loading...</td>
+                  <td colspan="4" class="loading">Loading...</td>
                 </tr>
               </tbody>
             </table>
           </div>
         </div>
-      </section>
       </section>
     </div>
 

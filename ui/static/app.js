@@ -781,7 +781,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // 税区分ルール削除（グローバル関数）
-    window.deleteTaxRule = async (vendorCode, vendorName) => {
+    window.deleteVendorTaxRule = async (vendorCode, vendorName) => {
         if (!confirm(`${vendorName} (${vendorCode}) の税区分ルールを削除しますか？`)) return;
         try {
             const res = await fetch(`/api/rules/tax/${encodeURIComponent(vendorCode)}`, { method: 'DELETE' });
@@ -831,12 +831,75 @@ document.addEventListener('DOMContentLoaded', () => {
 
             loadAccountRules(rule.vendor_code);
 
+            // 税区分例外ルール (①-2) を読み込む
+            if (window.loadTaxRules) window.loadTaxRules(rule.vendor_code);
+
             // 注意事項を読み込む
             if (window.loadVendorNotes) window.loadVendorNotes(rule.vendor_code);
+
+            // 支払条件を読み込む
+            loadPaymentCondition(rule.vendor_code);
         } catch (e) {
             console.error("selectVendor error:", e);
             showError("選択処理でエラーが発生しました: " + e.message);
         }
+    }
+
+    // ---- 支払条件 読込 ----
+    async function loadPaymentCondition(vendorCode) {
+        const msg = document.getElementById('paymentConditionMsg');
+        try {
+            const res = await fetch(`/api/master/vendor/${encodeURIComponent(vendorCode)}/payment-condition`);
+            if (!res.ok) { if (msg) msg.textContent = '取得失敗'; return; }
+            const d = await res.json();
+
+            const f = (id, val) => { const el = document.getElementById(id); if (el) el.value = val ?? ''; };
+            f('editClosingDay',          d.closing_day          ?? 0);
+            f('editPaymentMonthOffset',  d.payment_month_offset ?? 1);
+            f('editPaymentDay',          d.payment_day          ?? 0);
+            f('editHolidayHandling',     d.holiday_handling     ?? '1');
+            f('editNoMonthCrossing',     d.no_month_crossing    ?? 0);
+            if (msg) msg.textContent = '';
+        } catch (e) {
+            console.error('loadPaymentCondition error:', e);
+            if (msg) msg.textContent = '読込エラー';
+        }
+    }
+
+    // ---- 支払条件 保存 ----
+    const btnSavePaymentCondition = document.getElementById('btnSavePaymentCondition');
+    if (btnSavePaymentCondition) {
+        btnSavePaymentCondition.addEventListener('click', async () => {
+            const vCode = detailVendorCode ? detailVendorCode.textContent.trim() : '-';
+            if (vCode === '-' || !vCode) { showError('取引先が選択されていません'); return; }
+
+            const g = (id) => document.getElementById(id)?.value ?? '';
+            const body = {
+                closing_day:          parseInt(g('editClosingDay'), 10)          || 0,
+                payment_month_offset: parseInt(g('editPaymentMonthOffset'), 10)  || 0,
+                payment_day:          parseInt(g('editPaymentDay'), 10)           || 0,
+                holiday_handling:     g('editHolidayHandling') || '1',
+                no_month_crossing:    parseInt(g('editNoMonthCrossing'), 10)      || 0,
+            };
+
+            const msg = document.getElementById('paymentConditionMsg');
+            if (msg) msg.textContent = '保存中…';
+            try {
+                const res = await fetch(`/api/master/vendor/${encodeURIComponent(vCode)}/payment-condition`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+                const d = await res.json();
+                if (!res.ok) { showError(d.detail || '保存失敗'); if (msg) msg.textContent = '保存失敗'; return; }
+                if (msg) { msg.textContent = '✓ 保存しました'; msg.style.color = 'var(--ok)'; }
+                setTimeout(() => { if (msg) { msg.textContent = ''; msg.style.color = ''; } }, 3000);
+            } catch (e) {
+                console.error('savePaymentCondition error:', e);
+                showError('通信エラー: ' + e.message);
+                if (msg) msg.textContent = '保存エラー';
+            }
+        });
     }
 
     // Save Tax
@@ -1314,14 +1377,13 @@ document.addEventListener('DOMContentLoaded', () => {
     // 部門担当ロード
     async function loadAssignmentDept() {
         if (!assignDeptBody) return;
-        assignDeptBody.innerHTML = '<tr><td colspan="3" class="loading">Loading...</td></tr>';
+        assignDeptBody.innerHTML = '<tr><td colspan="4" class="loading">Loading...</td></tr>';
         try {
             const res = await fetch('/api/assignment/dept');
             if (!res.ok) throw new Error("Failed to load");
             const list = await res.json();
-            window._deptList = list; // Cache for search
+            window._deptList = list;
 
-            // 検索フィルターが入力済みの場合はフィルター後のリストで描画（フィルター保持）
             const currentQ = searchAssignDept ? searchAssignDept.value.trim().toLowerCase() : '';
             if (currentQ) {
                 const filtered = list.filter(item =>
@@ -1334,13 +1396,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 renderAssignmentDept(list);
             }
         } catch (e) {
-            assignDeptBody.innerHTML = `<tr><td colspan="3" class="error">${e.message}</td></tr>`;
+            assignDeptBody.innerHTML = `<tr><td colspan="4" class="error">${e.message}</td></tr>`;
         }
     }
 
     function renderAssignmentDept(list) {
         if (list.length === 0) {
-            assignDeptBody.innerHTML = '<tr><td colspan="3" class="muted">データがありません</td></tr>';
+            assignDeptBody.innerHTML = '<tr><td colspan="4" class="muted">データがありません</td></tr>';
             return;
         }
         assignDeptBody.innerHTML = list.map(item => `
@@ -1350,6 +1412,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 <td class="editable" onclick="editAssignee('dept', '${item.dept_code}', '${escapeHtml(item.assignee || '')}')">
                     ${item.assignee ? escapeHtml(item.assignee) : '<span class="muted">(未設定)</span>'}
                 </td>
+                <td style="color: ${item.assignee2 ? 'var(--primary, #1a73e8)' : 'var(--muted)'};">
+                    ${item.assignee2 ? escapeHtml(item.assignee2) : '<span class="muted">-</span>'}
+                </td>
             </tr>
         `).join('');
     }
@@ -1357,14 +1422,13 @@ document.addEventListener('DOMContentLoaded', () => {
     // 取引先担当ロード
     async function loadAssignmentVendor() {
         if (!assignVendorBody) return;
-        assignVendorBody.innerHTML = '<tr><td colspan="3" class="loading">Loading...</td></tr>';
+        assignVendorBody.innerHTML = '<tr><td colspan="4" class="loading">Loading...</td></tr>';
         try {
             const res = await fetch('/api/assignment/vendor');
             if (!res.ok) throw new Error("Failed to load");
             const list = await res.json();
             window._vendorList = list;
 
-            // 検索フィルターが入力済みの場合はフィルター後のリストで描画（フィルター保持）
             const currentQ = searchAssignVendor ? searchAssignVendor.value.trim().toLowerCase() : '';
             if (currentQ) {
                 const filtered = list.filter(item =>
@@ -1377,13 +1441,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 renderAssignmentVendor(list);
             }
         } catch (e) {
-            assignVendorBody.innerHTML = `<tr><td colspan="3" class="error">${e.message}</td></tr>`;
+            assignVendorBody.innerHTML = `<tr><td colspan="4" class="error">${e.message}</td></tr>`;
         }
     }
 
     function renderAssignmentVendor(list) {
         if (list.length === 0) {
-            assignVendorBody.innerHTML = '<tr><td colspan="3" class="muted">データがありません</td></tr>';
+            assignVendorBody.innerHTML = '<tr><td colspan="4" class="muted">データがありません</td></tr>';
             return;
         }
         assignVendorBody.innerHTML = list.map(item => `
@@ -1393,8 +1457,74 @@ document.addEventListener('DOMContentLoaded', () => {
                 <td class="editable" onclick="editAssignee('vendor', '${item.vendor_code}', '${escapeHtml(item.assignee || '')}')">
                     ${item.assignee ? escapeHtml(item.assignee) : '<span class="muted">(未設定)</span>'}
                 </td>
+                <td style="color: ${item.assignee2 ? 'var(--primary, #1a73e8)' : 'var(--muted)'};">
+                    ${item.assignee2 ? escapeHtml(item.assignee2) : '<span class="muted">-</span>'}
+                </td>
             </tr>
         `).join('');
+    }
+
+    // 担当1 → 担当2 コピーボタン
+    const btnCopyToAssignee2 = document.getElementById('btnCopyToAssignee2');
+    const btnPushAssignee2 = document.getElementById('btnPushAssignee2');
+    const assignee2CopyMsg = document.getElementById('assignee2CopyMsg');
+
+    if (btnCopyToAssignee2) {
+        btnCopyToAssignee2.addEventListener('click', async () => {
+            if (!confirm('担当1の内容を担当2に一括コピーします。\n現在のアプリ上の担当2の値は上書きされます。よろしいですか？')) return;
+            btnCopyToAssignee2.disabled = true;
+            assignee2CopyMsg.textContent = '⏳ コピー中...';
+            assignee2CopyMsg.style.color = 'var(--muted)';
+            try {
+                const res = await fetch('/api/assignment/copy-to-assignee2', { method: 'POST' });
+                const data = await res.json();
+                assignee2CopyMsg.textContent = `✅ ${data.message}（スプシへの反映は「担当2をスプシに反映」ボタンで行ってください）`;
+                assignee2CopyMsg.style.color = 'green';
+                loadAssignmentDept();
+                loadAssignmentVendor();
+            } catch (e) {
+                assignee2CopyMsg.textContent = `❌ エラー: ${e.message}`;
+                assignee2CopyMsg.style.color = 'red';
+            } finally {
+                btnCopyToAssignee2.disabled = false;
+            }
+        });
+    }
+
+    if (btnPushAssignee2) {
+        btnPushAssignee2.addEventListener('click', async () => {
+            const spreadsheetId = document.getElementById('spreadsheetId');
+            const sheetId = spreadsheetId ? spreadsheetId.value.trim() : '';
+            if (!sheetId) {
+                alert('スプレッドシートIDを入力してください（チェック実行タブで設定）');
+                return;
+            }
+            if (!confirm('アプリ上の担当2をスプレッドシートに反映します。\nスプシの担当2列が上書きされます。よろしいですか？')) return;
+
+            btnPushAssignee2.disabled = true;
+            assignee2CopyMsg.textContent = '⏳ スプシに反映中...';
+            assignee2CopyMsg.style.color = 'var(--muted)';
+            try {
+                const rawId = sheetId;
+                const match = rawId.match(/\/d\/([a-zA-Z0-9-_]+)/);
+                const id = match ? match[1] : rawId;
+
+                const res = await fetch('/api/assignment/push-assignee2', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ spreadsheet_id: id })
+                });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.detail || data.message || '反映に失敗しました');
+                assignee2CopyMsg.textContent = `✅ ${data.message}`;
+                assignee2CopyMsg.style.color = 'green';
+            } catch (e) {
+                assignee2CopyMsg.textContent = `❌ エラー: ${e.message}`;
+                assignee2CopyMsg.style.color = 'red';
+            } finally {
+                btnPushAssignee2.disabled = false;
+            }
+        });
     }
 
     // 検索フィルタ
@@ -1944,6 +2074,8 @@ window.toggleTaxScopeKeyInput = (val) => {
     }
 };
 
+const _esc = (s) => String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
 window.loadTaxRules = async (vendorCode) => {
     const tbody = document.getElementById('taxRuleListBody');
     if (!tbody) return;
@@ -1962,25 +2094,25 @@ window.loadTaxRules = async (vendorCode) => {
         tbody.innerHTML = list.map(item => `
             <tr>
                 <td>
-                    <span class="badge ${item.scope_type === 'DEPT_TYPE' ? 'orange' : ''}">${item.scope_type}</span>
-                    ${item.scope_key || '*'}
+                    <span class="badge ${item.scope_type === 'DEPT_TYPE' ? 'orange' : ''}">${_esc(item.scope_type)}</span>
+                    ${_esc(item.scope_key || '*')}
                 </td>
-                <td>${escapeHtml(item.expected_tax)}</td>
-                <td>${escapeHtml(item.reason || '')}</td>
+                <td>${_esc(item.expected_tax)}</td>
+                <td>${_esc(item.reason || '')}</td>
                 <td>
-                    <button class="danger xs" onclick="deleteTaxRule(${item.id}, '${vendorCode}')">削除</button>
+                    <button class="danger xs" onclick="deleteTaxRule(${item.id}, '${_esc(vendorCode)}')">削除</button>
                 </td>
             </tr>
         `).join('');
     } catch (e) {
-        tbody.innerHTML = `<tr><td colspan="4" class="error">${e.message}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="4" class="error">${_esc(e.message)}</td></tr>`;
     }
 };
 
 const btnAddTaxRule = document.getElementById('btnAddTaxRule');
 if (btnAddTaxRule) {
     btnAddTaxRule.addEventListener('click', async () => {
-        const vendorCode = document.getElementById('editVendorCode').textContent.trim();
+        const vendorCode = document.getElementById('detailVendorCode')?.textContent?.trim() || '';
         const scopeType = document.getElementById('newTaxScopeType').value;
         const scopeKey = document.getElementById('newTaxScopeKey').value.trim();
         const expectedTax = document.getElementById('newTaxExpected').value.trim();
@@ -2098,25 +2230,103 @@ function startOCRPolling() {
     ocrPollTimer = setInterval(pollTask, 3000);
 }
 
+// ZIPファイル選択・ドロップ時にファイル名を表示
+function _updateOcrFileLabel(files) {
+    const label = document.getElementById('ocrZipFileName');
+    if (!label) return;
+    const count = files.length;
+    if (count === 0) {
+        label.textContent = 'ファイル未選択 / ここにZIPをドロップ';
+        label.style.color = 'var(--muted)';
+    } else if (count === 1) {
+        label.textContent = `📄 ${files[0].name}`;
+        label.style.color = 'var(--text)';
+    } else {
+        label.textContent = `📦 ${count}件のZIPを選択中`;
+        label.style.color = 'var(--text)';
+    }
+}
+
+const ocrZipFileInput = document.getElementById('ocrZipFile');
+if (ocrZipFileInput) {
+    ocrZipFileInput.addEventListener('change', () => {
+        _updateOcrFileLabel(ocrZipFileInput.files);
+    });
+}
+
+// ドラッグ＆ドロップ対応
+const ocrDropZone = document.getElementById('ocrDropZone');
+if (ocrDropZone) {
+    ocrDropZone.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        ocrDropZone.style.borderColor = 'var(--accent)';
+        ocrDropZone.style.background = 'rgba(99,102,241,0.08)';
+    });
+    ocrDropZone.addEventListener('dragleave', (e) => {
+        ocrDropZone.style.borderColor = 'var(--line)';
+        ocrDropZone.style.background = 'var(--bg-secondary)';
+    });
+    ocrDropZone.addEventListener('drop', (e) => {
+        e.preventDefault();
+        ocrDropZone.style.borderColor = 'var(--line)';
+        ocrDropZone.style.background = 'var(--bg-secondary)';
+        const dropped = Array.from(e.dataTransfer.files).filter(f => f.name.toLowerCase().endsWith('.zip'));
+        if (dropped.length === 0) {
+            alert('ZIPファイルのみドロップできます');
+            return;
+        }
+        // DataTransfer を file input に反映
+        const dt = new DataTransfer();
+        for (const f of dropped) dt.items.add(f);
+        ocrZipFileInput.files = dt.files;
+        _updateOcrFileLabel(dropped);
+    });
+}
+
 async function runOCR(fast) {
+    // ZIPファイルの確認
+    const zipInput = document.getElementById('ocrZipFile');
+    const zipFiles = zipInput ? Array.from(zipInput.files) : [];
+
+    if (zipFiles.length === 0) {
+        alert('ZIPファイルを選択してください。\n「ZIPを選択」ボタンから請求書のZIPファイルを選んでください。');
+        return;
+    }
+
     const confirmMsg = fast
-        ? '高速解析を実行しますか？（傾き補正なし）'
-        : '請求書ファイルの一覧を取得しますか？';
+        ? `${zipFiles.length}件のZIPを高速解析しますか？（傾き補正なし）`
+        : `${zipFiles.length}件のZIPを解析しますか？`;
     if (!confirm(confirmMsg)) return;
 
     btnRunOCR.disabled = true;
     if (btnRunOCRFast) btnRunOCRFast.disabled = true;
-    ocrStatusMsg.textContent = fast ? 'Starting fast analysis...' : 'Starting analysis...';
+    ocrStatusMsg.textContent = `ZIPファイル ${zipFiles.length}件をアップロード中...`;
 
     // 即座にポーリング開始
     startOCRPolling();
 
     try {
-        const url = fast ? '/api/ocr/analyze?fast=true' : '/api/ocr/analyze';
-        const res = await fetch(url, { method: 'POST' });
-        if (!res.ok) throw new Error((await res.json()).detail);
+        // FormData に全ZIPファイルを添付して送信
+        const formData = new FormData();
+        for (const f of zipFiles) {
+            formData.append('files', f);
+        }
 
-        showSuccess(fast ? '高速OCR解析を開始しました' : 'ファイルスキャンを開始しました');
+        const url = fast ? '/api/ocr/analyze?fast=true' : '/api/ocr/analyze';
+        const res = await fetch(url, { method: 'POST', body: formData });
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({ detail: res.statusText }));
+            throw new Error(err.detail || res.statusText);
+        }
+
+        const data = await res.json().catch(() => ({}));
+        const skipCount = data.skip_count || 0;
+        const processCount = data.process_count || 0;
+        const modeMsg = skipCount > 0
+            ? `差分解析: 新規/変更=${processCount}件, スキップ=${skipCount}件（前回と同じ）`
+            : `全件解析: ${processCount}件`;
+        ocrStatusMsg.textContent = modeMsg;
+        showSuccess(modeMsg);
         // ポーリングは継続
 
     } catch (e) {
@@ -2141,6 +2351,7 @@ if (btnExportExcel) {
         window.open('/api/ocr/export', '_blank');
     });
 }
+
 
 // Helper for OCR Scope
 const ocrEscapeHtml = (str) => {

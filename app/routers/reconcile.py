@@ -676,6 +676,9 @@ async def sync_sheet(
 @router.get("/download/{filename}")
 async def download_result(filename: str):
     """結果Excelのダウンロード"""
+    if "/" in filename or "\\" in filename or ".." in filename or not filename.lower().endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
     file_path = Path("output/reconcile") / filename
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found")

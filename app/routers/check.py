@@ -128,6 +128,9 @@ async def get_status():
 @router.get("/download/{filename}")
 async def download_excel(filename: str):
     """Excelファイルをダウンロード"""
+    if "/" in filename or "\\" in filename or ".." in filename or not filename.lower().endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
     output_dir = Path(__file__).parent.parent.parent / "data"
     file_path = output_dir / filename
     

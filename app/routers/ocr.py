@@ -97,18 +97,22 @@ def _get_zip_log() -> dict:
         return {}
 
 
-def _update_zip_log(process_zip_files: list):
-    """処理済みZIPを ocr_zip_log に記録・更新"""
-    if not process_zip_files:
+def _update_zip_log(zip_info_list: list):
+    """処理済みZIPを ocr_zip_log に記録・更新
+
+    zip_info_list: [(zip_filename, zip_size), ...]
+    （ZIPは展開後すぐ削除されるため、削除前に控えたサイズを受け取る）
+    """
+    if not zip_info_list:
         return
     try:
         with sqlite3.connect(DB_PATH) as conn:
             conn.executemany("""
                 INSERT OR REPLACE INTO ocr_zip_log (zip_filename, zip_size, processed_at)
                 VALUES (?, ?, datetime('now', 'localtime'))
-            """, [(zf.name, zf.stat().st_size) for zf in process_zip_files if zf.exists()])
+            """, zip_info_list)
             conn.commit()
-        logger.info(f"ocr_zip_log 更新: {len(process_zip_files)} 件")
+        logger.info(f"ocr_zip_log 更新: {len(zip_info_list)} 件")
     except Exception as e:
         logger.warning(f"_update_zip_log error: {e}")
 
@@ -308,7 +312,9 @@ async def analyze_invoices(
     # 3. ZIP_FILE_OUT の準備
     # - 処理対象ZIPのみ展開（スキップZIPの既存ファイルは保持）
     # - resume=False かつ全件処理の場合は ZIP_FILE_OUT をクリア
-    if not resume:
+    # - zip_files が空（新規アップロードなし・ZIP_FILE_INも空）の場合は、
+    #   処理対象が無いだけなので既存データ（前回結果）を破壊してはならない
+    if not resume and zip_files:
         if skip_count == 0:
             # 全件新規/変更 → ZIP_FILE_OUT を全クリア & 全結果クリア
             if zip_out_path.exists():
@@ -340,9 +346,13 @@ async def analyze_invoices(
     pdf_archive_path.mkdir(parents=True, exist_ok=True)
 
     # 4. 処理対象ZIPのみ展開 & PDF_ARCHIVEにもコピー（永続保管）
+    # 削除前にサイズを控えておく（削除後は zf.exists() が False になり zip_log に記録できないため）
+    processed_zip_info = []
     for zf in process_zips:
+        zip_size = zf.stat().st_size
         _extract_zip(zf, zip_out_path)
         _archive_extracted_files(zip_out_path, pdf_archive_path, zf)
+        processed_zip_info.append((zf.name, zip_size))
         os.remove(zf)
         logger.info(f"Deleted: {zf.name}")
 
@@ -364,15 +374,15 @@ async def analyze_invoices(
     # 5. バックグラウンドでOCR実行
     import asyncio
 
-    def _run_ocr_thread(svc, rid, zip_path, is_fast, done_zips):
+    def _run_ocr_thread(svc, rid, zip_path, is_fast, zip_info_list):
         """async process_and_match をスレッド内で実行し、完了後にzip_logを更新"""
         asyncio.run(svc.process_and_match(rid, zip_path, is_fast))
-        _update_zip_log(done_zips)
+        _update_zip_log(zip_info_list)
 
     service = InvoiceMatchService(DB_PATH)
     t = threading.Thread(
         target=_run_ocr_thread,
-        args=(service, run_id, zip_out_path, fast, process_zips),
+        args=(service, run_id, zip_out_path, fast, processed_zip_info),
         daemon=True,
         name="ocr-worker"
     )

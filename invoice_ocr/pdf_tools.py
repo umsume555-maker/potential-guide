@@ -108,6 +108,125 @@ def pdf_to_images(pdf_path: Path, dpi: int = 200) -> list:
         return []
 
 
+def normalize_pdf_rotation(pdf_path: Path, dpi: int = 100) -> Optional[int]:
+    """PDFの各ページ向きを検出し、/Rotate メタデータを書き戻して正立化する。
+
+    元ファイルを上書き更新する（再描画はせず /Rotate を更新するだけなので軽量・無劣化）。
+    既に正立しているページは変更しない。失敗時は None を返し元ファイルは保持。
+
+    Returns:
+        書き換えたページ数。pypdf 等が無い、または処理失敗時は None。
+    """
+    try:
+        from pypdf import PdfReader, PdfWriter
+    except ImportError:
+        print("[WARN] pypdf がインストールされていません: pip install pypdf")
+        return None
+
+    images = pdf_to_images(pdf_path, dpi=dpi)
+    if not images:
+        return None
+
+    from .preprocess import detect_rotation
+
+    try:
+        reader = PdfReader(str(pdf_path))
+        page_count = len(reader.pages)
+        if page_count == 0:
+            return 0
+
+        # 検出ページ数 == PDFページ数 でないと対応が崩れる
+        if len(images) != page_count:
+            print(f"[WARN] PDF page count mismatch: pdf={page_count}, images={len(images)} ({pdf_path.name})")
+            return None
+
+        writer = PdfWriter(clone_from=reader)
+        changed = 0
+        for i, page in enumerate(writer.pages):
+            try:
+                angle = detect_rotation(images[i])
+            except Exception:
+                angle = 0
+            if not angle:
+                continue
+            # 既存の /Rotate に合算（90単位に正規化）
+            current = int(page.get("/Rotate", 0)) % 360
+            new_rot = (current + int(angle)) % 360
+            if new_rot != current:
+                page.rotate(int(angle))
+                changed += 1
+
+        if changed == 0:
+            return 0
+
+        tmp_path = pdf_path.with_suffix(pdf_path.suffix + ".tmp")
+        with open(tmp_path, "wb") as f:
+            writer.write(f)
+        # 原子的に置き換え
+        import os
+        os.replace(str(tmp_path), str(pdf_path))
+        return changed
+    except Exception as e:
+        print(f"[ERROR] PDF rotation normalize failed: {pdf_path} - {e}")
+        return None
+
+
+def normalize_pdf_rotation_via_gemini(pdf_path: Path, api_key: str, model: str = "gemini-2.0-flash") -> Optional[int]:
+    """Geminiにページ向きを判定させ、PDFの /Rotate メタデータを書き戻す。
+
+    pdf2image / Poppler / Tesseract に非依存。再描画はせず /Rotate を更新するだけなので
+    軽量・無劣化で、画像化のコストもかからない。
+
+    Returns:
+        書き換えたページ数。pypdf 不在 or 取得失敗 or 不一致時は None。
+    """
+    try:
+        from pypdf import PdfReader, PdfWriter
+    except ImportError:
+        return None
+
+    from .ai_ocr import detect_pdf_rotation_with_gemini
+
+    angles = detect_pdf_rotation_with_gemini(pdf_path, api_key, model)
+    if not angles:
+        return None
+
+    try:
+        reader = PdfReader(str(pdf_path))
+        page_count = len(reader.pages)
+        if page_count == 0:
+            return 0
+
+        if len(angles) != page_count:
+            print(f"[WARN] Gemini rotation page count mismatch: pdf={page_count}, gemini={len(angles)} ({pdf_path.name})")
+            return None
+
+        writer = PdfWriter(clone_from=reader)
+        changed = 0
+        for i, page in enumerate(writer.pages):
+            angle = angles[i]
+            if not angle:
+                continue
+            current = int(page.get("/Rotate", 0)) % 360
+            new_rot = (current + angle) % 360
+            if new_rot != current:
+                page.rotate(angle)
+                changed += 1
+
+        if changed == 0:
+            return 0
+
+        tmp_path = pdf_path.with_suffix(pdf_path.suffix + ".tmp")
+        with open(tmp_path, "wb") as f:
+            writer.write(f)
+        import os
+        os.replace(str(tmp_path), str(pdf_path))
+        return changed
+    except Exception as e:
+        print(f"[ERROR] PDF rotation write failed: {pdf_path} - {e}")
+        return None
+
+
 def is_text_pdf(pdf_path: Path, min_chars: int = 50) -> bool:
     """
     テキスト層を持つPDFかどうかを判定

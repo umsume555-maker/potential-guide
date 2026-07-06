@@ -315,7 +315,7 @@ class SpreadsheetService:
                     items_to_upload = []
 
                     for i, url in enumerate(urls):
-                        if "localhost" not in url:
+                        if "/api/ocr/files/" not in url:
                             continue
                         fname = self._extract_filename_from_url(url)
                         if not fname:
@@ -338,7 +338,7 @@ class SpreadsheetService:
                     continue
 
                 # 3. 単一リンク
-                if "localhost" not in ocr_link:
+                if "/api/ocr/files/" not in ocr_link:
                     continue
 
                 fname = self._extract_filename(ocr_link)

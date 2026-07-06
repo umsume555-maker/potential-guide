@@ -17,6 +17,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('btnAddTargetVendor').addEventListener('click', addTargetVendor);
 
+    // 除外部門管理
+    initExcludedDeptPanel();
+
     // Auto-refresh Monthly Status on change
     const onConditionChange = () => {
         const v = document.getElementById('reconcileVendorSelect').value;
@@ -52,6 +55,7 @@ async function loadVendors() {
         });
 
         renderVendorOptions(cachedVendors);
+        refreshExcludedDeptVendorSelect();
 
         // Toggle Init Button based on selection
         select.addEventListener('change', () => {
@@ -172,12 +176,10 @@ async function runReconcile(e) {
     const btn = document.getElementById('btnRunReconcile');
     const statusMsg = document.getElementById('reconcileStatusMsg');
     const resultArea = document.getElementById('reconcileResultArea');
-    const btnSync = document.getElementById('btnSyncSheet');
-    const syncStatus = document.getElementById('syncStatus');
+    const btnSync = document.getElementById('btnSyncSheetReconcile');
 
     btn.disabled = true;
     btnSync.disabled = true;
-    syncStatus.textContent = "";
 
     statusMsg.textContent = "実行中... (抽出・紐付け・突合)";
     statusMsg.style.color = "blue";
@@ -209,7 +211,6 @@ async function runReconcile(e) {
         // Store details for Sync
         lastReconcileDetails = data.details || [];
         btnSync.disabled = false;
-        syncStatus.textContent = "※先にチェックを実行してください (完了済み)";
 
         // Show Record Summary
         document.getElementById('recCountExtracted').textContent = data.summary.extracted;
@@ -1006,6 +1007,115 @@ async function deleteTargetVendor(code) {
         }
     } catch (e) {
         alert("通信エラー");
+    }
+}
+
+// === 除外部門管理 ===
+let _excludedDeptVendor = '';
+
+function initExcludedDeptPanel() {
+    // 取引先セレクト（テンプレートあり取引先のみ）を埋める
+    const sel = document.getElementById('excludedDeptVendorSelect');
+    if (!sel) return;
+
+    document.getElementById('btnLoadExcludedDepts').addEventListener('click', () => {
+        const vc = sel.value;
+        if (!vc) { alert('取引先を選択してください'); return; }
+        _excludedDeptVendor = vc;
+        loadExcludedDepts(vc);
+        document.getElementById('excludedDeptsPanel').style.display = 'block';
+    });
+
+    document.getElementById('btnAddExcludedDept').addEventListener('click', addExcludedDept);
+
+    // vendorsが読み込まれた後にセレクトを更新するため、少し遅延
+    setTimeout(refreshExcludedDeptVendorSelect, 1200);
+}
+
+function refreshExcludedDeptVendorSelect() {
+    const sel = document.getElementById('excludedDeptVendorSelect');
+    if (!sel || !cachedVendors) return;
+    sel.innerHTML = '<option value="">取引先を選択...</option>';
+    cachedVendors
+        .filter(v => v.has_template)
+        .forEach(v => {
+            const opt = document.createElement('option');
+            opt.value = v.vendor_code;
+            opt.textContent = `${v.vendor_name} (${v.vendor_code})`;
+            sel.appendChild(opt);
+        });
+}
+
+async function loadExcludedDepts(vendorCode) {
+    const tbody = document.getElementById('excludedDeptsBody');
+    if (!tbody) return;
+    tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;">読込中...</td></tr>';
+    try {
+        const res = await fetch(`/api/reconcile/excluded_depts/${encodeURIComponent(vendorCode)}`);
+        if (!res.ok) throw new Error("API Error");
+        const list = await res.json();
+        renderExcludedDeptsTable(list, vendorCode);
+    } catch (e) {
+        tbody.innerHTML = '<tr><td colspan="3" style="color:red;">読込エラー</td></tr>';
+    }
+}
+
+function renderExcludedDeptsTable(list, vendorCode) {
+    const tbody = document.getElementById('excludedDeptsBody');
+    tbody.innerHTML = '';
+    if (!list || list.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="3" style="text-align:center; color:var(--muted);">除外部門なし</td></tr>';
+        return;
+    }
+    list.forEach(item => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+            <td style="font-family:monospace;">${escHtml(item.dept_code)}</td>
+            <td>${escHtml(item.reason || '-')}</td>
+            <td style="text-align:center;">
+                <button class="danger xs" onclick="deleteExcludedDept('${escHtml(vendorCode)}', '${escHtml(item.dept_code)}')">削除</button>
+            </td>
+        `;
+        tbody.appendChild(tr);
+    });
+}
+
+async function addExcludedDept() {
+    const vendorCode = _excludedDeptVendor;
+    if (!vendorCode) { alert('取引先を選択してください'); return; }
+
+    const deptCode = document.getElementById('newExcludedDeptCode').value.trim();
+    const reason = document.getElementById('newExcludedDeptReason').value.trim();
+
+    if (!deptCode) { alert('部門コードを入力してください'); return; }
+
+    const formData = new FormData();
+    formData.append('vendor_code', vendorCode);
+    formData.append('dept_code', deptCode);
+    formData.append('reason', reason);
+
+    try {
+        const res = await fetch('/api/reconcile/excluded_depts', { method: 'POST', body: formData });
+        if (!res.ok) throw new Error(await res.text());
+        document.getElementById('newExcludedDeptCode').value = '';
+        document.getElementById('newExcludedDeptReason').value = '';
+        await loadExcludedDepts(vendorCode);
+    } catch (e) {
+        alert('追加エラー: ' + e.message);
+    }
+}
+
+async function deleteExcludedDept(vendorCode, deptCode) {
+    if (!confirm(`部門コード ${deptCode} を除外リストから削除しますか？`)) return;
+    try {
+        const res = await fetch(
+            `/api/reconcile/excluded_depts/${encodeURIComponent(vendorCode)}?dept_code=${encodeURIComponent(deptCode)}`,
+            { method: 'DELETE' }
+        );
+        if (!res.ok) throw new Error(await res.text());
+        await loadExcludedDepts(vendorCode);
+    } catch (e) {
+        alert('削除エラー: ' + e.message);
     }
 }
 
