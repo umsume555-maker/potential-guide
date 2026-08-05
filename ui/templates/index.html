@@ -65,6 +65,9 @@
               <button class="primary" id="btnRunOCRFast" style="font-size: 1.1em; padding: 12px 30px;" title="傾き補正なしで高速処理">
                 ⚡ 高速解析
               </button>
+              <button class="secondary" id="btnRunOCRLinkOnly" style="font-size: 1.1em; padding: 12px 30px;" title="金額・請求書番号の読取を省略し、リンクのみ生成（最速・OCR判定は使えません）">
+                🔗 リンクのみ生成
+              </button>
               <button class="secondary" id="btnExportExcel" style="font-size: 1.1em; padding: 12px 30px;">
                 ⬇ Excel出力
               </button>
@@ -346,7 +349,15 @@
 
             <div id="excludedDeptsPanel" style="display:none;">
               <div class="row" style="margin-bottom:10px; gap:10px; flex-wrap:wrap;">
-                <input type="text" id="newExcludedDeptCode" placeholder="部門コード (例: 03101100)" style="width:160px;">
+                <div style="position:relative; width:200px;">
+                  <div style="display:flex; gap:4px;">
+                    <input type="text" id="newExcludedDeptCode" placeholder="部門コード (例: 03101100)" style="flex:1; min-width:0;">
+                    <button type="button" class="secondary sm" id="btnSearchNewExcludedDeptCode" title="部門を検索">🔍</button>
+                  </div>
+                  <div id="newExcludedDeptCodeName" style="font-size:0.78em; color:var(--muted); margin-top:2px; min-height:16px;"></div>
+                  <!-- 候補ドロップダウン -->
+                  <div id="newExcludedDeptCodeDropdown" class="account-dropdown" style="display:none;"></div>
+                </div>
                 <input type="text" id="newExcludedDeptReason" placeholder="理由 (例: チェック実行対象外)" style="flex:1; min-width:160px;">
                 <button class="primary sm" id="btnAddExcludedDept">追加</button>
               </div>
@@ -471,8 +482,16 @@
                 <h3>⛔ 例外部門管理</h3>
                 <p class="hint" style="margin:0 0 12px 0;">登録された部門はExcel出力・スプレッドシートから除外されます</p>
 
-                <div style="display:flex;gap:8px;margin-bottom:12px;">
-                  <input type="text" id="newExceptionDeptCode" placeholder="部門コード" style="flex:1;">
+                <div style="display:flex;gap:8px;margin-bottom:12px;align-items:flex-start;">
+                  <div style="position:relative; flex:1;">
+                    <div style="display:flex; gap:4px;">
+                      <input type="text" id="newExceptionDeptCode" placeholder="部門コード" style="flex:1; min-width:0;">
+                      <button type="button" class="secondary sm" id="btnSearchNewExceptionDeptCode" title="部門を検索">🔍</button>
+                    </div>
+                    <div id="newExceptionDeptCodeName" style="font-size:0.78em; color:var(--muted); margin-top:2px; min-height:16px;"></div>
+                    <!-- 候補ドロップダウン -->
+                    <div id="newExceptionDeptCodeDropdown" class="account-dropdown" style="display:none;"></div>
+                  </div>
                   <input type="text" id="newExceptionDeptName" placeholder="部門名 (任意)" style="flex:1.5;">
                   <button type="button" class="secondary" id="btnAddExceptionDept">追加</button>
                 </div>
@@ -806,7 +825,17 @@
                       </select>
                       <input type="text" id="newAccountScopeKey" placeholder="値 (例: SGA)" style="flex:1">
                     </td>
-                    <td><input type="text" id="newAccountCode" placeholder="科目CD" style="width:100%"></td>
+                    <td>
+                      <div style="position:relative;">
+                        <div style="display:flex; gap:4px;">
+                          <input type="text" id="newAccountCode" placeholder="科目CD" style="flex:1; min-width:0;">
+                          <button type="button" class="secondary sm" id="btnSearchNewAccountCode" title="科目を検索">🔍</button>
+                        </div>
+                        <div id="newAccountCodeName" style="font-size:0.78em; color:var(--muted); margin-top:2px; min-height:16px;"></div>
+                        <!-- 候補ドロップダウン -->
+                        <div id="newAccountCodeDropdown" class="account-dropdown" style="display:none;"></div>
+                      </div>
+                    </td>
                     <td><input type="text" id="newAccountReason" placeholder="理由" style="width:100%"></td>
                     <td><button type="button" class="secondary sm" id="btnAddAccountRule">＋追加</button></td>
                   </tr>
@@ -1079,9 +1108,15 @@
                   <label>取引先コード <span style="color:var(--ng)">*</span></label>
                   <input type="text" id="ovVendorCode" required placeholder="例: 30001234">
                 </div>
-                <div style="flex:1">
+                <div style="flex:1; position:relative;">
                   <label>部門コード (任意)</label>
-                  <input type="text" id="ovDeptCode" placeholder="空欄なら全部門対象">
+                  <div style="display:flex; gap:4px;">
+                    <input type="text" id="ovDeptCode" placeholder="空欄なら全部門対象" style="flex:1; min-width:0;">
+                    <button type="button" class="secondary sm" id="btnSearchOvDeptCode" title="部門を検索">🔍</button>
+                  </div>
+                  <div id="ovDeptCodeName" style="font-size:0.78em; color:var(--muted); margin-top:2px; min-height:16px;"></div>
+                  <!-- 候補ドロップダウン -->
+                  <div id="ovDeptCodeDropdown" class="account-dropdown" style="display:none;"></div>
                 </div>
               </div>
 
@@ -1207,7 +1242,7 @@
   <div id="toast" class="toast"></div>
 
   <!-- 請求書プレビューモーダル -->
-  <div id="ocrPreviewModal" class="modal">
+  <div id="ocrPreviewModal" class="modal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.6); z-index:1000; align-items:center; justify-content:center;">
     <div class="modal-content wide"
       style="max-width: 90vw; height: 90vh; display:flex; flex-direction:column; padding:0;">
       <div class="hd" style="padding:15px; border-bottom:1px solid var(--border)">

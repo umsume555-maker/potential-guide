@@ -938,8 +938,9 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // ---- 科目検索ドロップダウン共通ロジック ----
-    function setupAccountSearch(inputId, btnId, dropdownId, nameDisplayId) {
+    // ---- コード検索ドロップダウン共通ロジック（科目・部門で共用） ----
+    function setupCodeSearchDropdown(inputId, btnId, dropdownId, nameDisplayId, opts) {
+        const { apiPath, codeField, nameField, emptyLabel } = opts;
         const input    = document.getElementById(inputId);
         const btn      = document.getElementById(btnId);
         const dropdown = document.getElementById(dropdownId);
@@ -949,14 +950,14 @@ document.addEventListener('DOMContentLoaded', () => {
         let currentItems = [];
         let highlightIdx = -1;
 
-        // 科目名をコードから取得して表示
-        async function resolveAccountName(code) {
+        // コードから名前を取得して表示
+        async function resolveName(code) {
             if (!nameDisp || !code) { if (nameDisp) nameDisp.textContent = ''; return; }
             try {
-                const r = await fetch(`/api/master/account-master?q=${encodeURIComponent(code)}`);
+                const r = await fetch(`${apiPath}?q=${encodeURIComponent(code)}`);
                 const list = await r.json();
-                const exact = list.find(a => a.account_code === code);
-                nameDisp.textContent = exact ? exact.account_name : '';
+                const exact = list.find(a => a[codeField] === code);
+                nameDisp.textContent = exact ? exact[nameField] : '';
             } catch { nameDisp.textContent = ''; }
         }
 
@@ -964,17 +965,17 @@ document.addEventListener('DOMContentLoaded', () => {
         async function showDropdown(q) {
             if (!q) { dropdown.style.display = 'none'; return; }
             try {
-                const r = await fetch(`/api/master/account-master?q=${encodeURIComponent(q)}`);
+                const r = await fetch(`${apiPath}?q=${encodeURIComponent(q)}`);
                 const list = await r.json();
                 currentItems = list;
                 highlightIdx = -1;
                 if (list.length === 0) {
-                    dropdown.innerHTML = `<div class="account-dropdown-empty">「${escapeHtml(q)}」に一致する科目なし</div>`;
+                    dropdown.innerHTML = `<div class="account-dropdown-empty">「${escapeHtml(q)}」に一致する${emptyLabel}なし</div>`;
                 } else {
                     dropdown.innerHTML = list.map((a, i) => `
                         <div class="account-dropdown-item" data-idx="${i}">
-                            <span class="ac-code">${escapeHtml(a.account_code)}</span>
-                            <span class="ac-name">${escapeHtml(a.account_name)}</span>
+                            <span class="ac-code">${escapeHtml(a[codeField])}</span>
+                            <span class="ac-name">${escapeHtml(a[nameField])}</span>
                         </div>`).join('');
                     // クリックで選択
                     dropdown.querySelectorAll('.account-dropdown-item').forEach(el => {
@@ -990,8 +991,8 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         function selectItem(item) {
-            input.value = item.account_code;
-            if (nameDisp) nameDisp.textContent = item.account_name;
+            input.value = item[codeField];
+            if (nameDisp) nameDisp.textContent = item[nameField];
             dropdown.style.display = 'none';
         }
 
@@ -1036,17 +1037,40 @@ document.addEventListener('DOMContentLoaded', () => {
         // フォーカスアウトで閉じる
         input.addEventListener('blur', () => {
             setTimeout(() => { dropdown.style.display = 'none'; }, 200);
-            resolveAccountName(input.value.trim());
+            resolveName(input.value.trim());
         });
 
         // 外部からコードをセットされたとき名前を解決
-        const origDescriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
-        input._resolveOnSet = resolveAccountName;
+        input._resolveOnSet = resolveName;
+    }
+
+    function setupAccountSearch(inputId, btnId, dropdownId, nameDisplayId) {
+        setupCodeSearchDropdown(inputId, btnId, dropdownId, nameDisplayId, {
+            apiPath: '/api/master/account-master',
+            codeField: 'account_code',
+            nameField: 'account_name',
+            emptyLabel: '科目'
+        });
+    }
+
+    function setupDeptSearch(inputId, btnId, dropdownId, nameDisplayId) {
+        setupCodeSearchDropdown(inputId, btnId, dropdownId, nameDisplayId, {
+            apiPath: '/api/master/department-master',
+            codeField: 'dept_code',
+            nameField: 'dept_name',
+            emptyLabel: '部門'
+        });
     }
 
     // COST科目・SGA科目に検索機能を設定
     setupAccountSearch('editCostAccount', 'btnSearchCostAccount', 'costAccountDropdown', 'costAccountName');
     setupAccountSearch('editSgaAccount',  'btnSearchSgaAccount',  'sgaAccountDropdown',  'sgaAccountName');
+    // 科目ルール(部門タイプ別/個別)の新規追加行にも検索機能を設定
+    setupAccountSearch('newAccountCode', 'btnSearchNewAccountCode', 'newAccountCodeDropdown', 'newAccountCodeName');
+    // 部門コード手入力欄に検索機能を設定
+    setupDeptSearch('newExcludedDeptCode',  'btnSearchNewExcludedDeptCode',  'newExcludedDeptCodeDropdown',  'newExcludedDeptCodeName');
+    setupDeptSearch('newExceptionDeptCode', 'btnSearchNewExceptionDeptCode', 'newExceptionDeptCodeDropdown', 'newExceptionDeptCodeName');
+    setupDeptSearch('ovDeptCode',            'btnSearchOvDeptCode',            'ovDeptCodeDropdown',            'ovDeptCodeName');
 
     // Save COST/SGA Accounts
     const btnSaveAccounts = document.getElementById('btnSaveAccounts');
@@ -2043,7 +2067,10 @@ window.copyToAccountInput = (sType, sKey, code) => {
         }
     }
 
-    if (codeInput) codeInput.value = code;
+    if (codeInput) {
+        codeInput.value = code;
+        if (codeInput._resolveOnSet) codeInput._resolveOnSet(code);
+    }
     if (reasonInput) reasonInput.focus();
 };
 
@@ -2162,6 +2189,7 @@ if (btnAddTaxRule) {
 // --- OCR Logic ---
 const btnRunOCR = document.getElementById('btnRunOCR');
 const btnRunOCRFast = document.getElementById('btnRunOCRFast');
+const btnRunOCRLinkOnly = document.getElementById('btnRunOCRLinkOnly');
 const btnRefreshOCR = document.getElementById('btnRefreshOCR');
 const btnExportExcel = document.getElementById('btnExportExcel');
 const ocrListBody = document.getElementById('ocrListBody');
@@ -2202,6 +2230,7 @@ function startOCRPolling() {
                     ocrStatusMsg.innerHTML = `<span style="color:var(--success); font-weight:bold;">✓ ${prog.message}</span>`; // messageには既に時間が含まれている
                     btnRunOCR.disabled = false;
                     if (btnRunOCRFast) btnRunOCRFast.disabled = false;
+                    if (btnRunOCRLinkOnly) btnRunOCRLinkOnly.disabled = false;
                     // 結果を自動更新
                     loadOCRResults();
                 } else if (prog.status === 'error') {
@@ -2209,6 +2238,7 @@ function startOCRPolling() {
                     ocrStatusMsg.innerHTML = `<span style="color:var(--error); font-weight:bold;">✗ ${prog.message}</span>`;
                     btnRunOCR.disabled = false;
                     if (btnRunOCRFast) btnRunOCRFast.disabled = false;
+                    if (btnRunOCRLinkOnly) btnRunOCRLinkOnly.disabled = false;
                 } else if (prog.status === 'running') {
                     // Runningの場合は独自メッセージを組み立てていたので、時間を追加
                     ocrStatusMsg.innerHTML = `<span style="color:var(--accent); font-weight:bold;">Running... ${prog.processed}/${prog.total} files${timeInfo}</span>`;
@@ -2224,6 +2254,7 @@ function startOCRPolling() {
             ocrStatusMsg.textContent = 'Running... (Auto-refresh stopped)';
             btnRunOCR.disabled = false;
             if (btnRunOCRFast) btnRunOCRFast.disabled = false;
+            if (btnRunOCRLinkOnly) btnRunOCRLinkOnly.disabled = false;
         }
     };
     pollTask();
@@ -2283,7 +2314,11 @@ if (ocrDropZone) {
     });
 }
 
-async function runOCR(fast) {
+async function runOCR(mode) {
+    // mode: 'normal' | 'fast' | 'link_only'
+    const isFast = mode === 'fast';
+    const isLinkOnly = mode === 'link_only';
+
     // ZIPファイルの確認
     const zipInput = document.getElementById('ocrZipFile');
     const zipFiles = zipInput ? Array.from(zipInput.files) : [];
@@ -2293,13 +2328,19 @@ async function runOCR(fast) {
         return;
     }
 
-    const confirmMsg = fast
-        ? `${zipFiles.length}件のZIPを高速解析しますか？（傾き補正なし）`
-        : `${zipFiles.length}件のZIPを解析しますか？`;
+    let confirmMsg;
+    if (isLinkOnly) {
+        confirmMsg = `${zipFiles.length}件のZIPをリンクのみ生成しますか？（金額・請求書番号の読取は行わず、OCR判定は使えなくなります）`;
+    } else if (isFast) {
+        confirmMsg = `${zipFiles.length}件のZIPを高速解析しますか？（傾き補正なし）`;
+    } else {
+        confirmMsg = `${zipFiles.length}件のZIPを解析しますか？`;
+    }
     if (!confirm(confirmMsg)) return;
 
     btnRunOCR.disabled = true;
     if (btnRunOCRFast) btnRunOCRFast.disabled = true;
+    if (btnRunOCRLinkOnly) btnRunOCRLinkOnly.disabled = true;
     ocrStatusMsg.textContent = `ZIPファイル ${zipFiles.length}件をアップロード中...`;
 
     // 即座にポーリング開始
@@ -2312,7 +2353,10 @@ async function runOCR(fast) {
             formData.append('files', f);
         }
 
-        const url = fast ? '/api/ocr/analyze?fast=true' : '/api/ocr/analyze';
+        const params = [];
+        if (isFast) params.push('fast=true');
+        if (isLinkOnly) params.push('link_only=true');
+        const url = '/api/ocr/analyze' + (params.length ? `?${params.join('&')}` : '');
         const res = await fetch(url, { method: 'POST', body: formData });
         if (!res.ok) {
             const err = await res.json().catch(() => ({ detail: res.statusText }));
@@ -2335,15 +2379,20 @@ async function runOCR(fast) {
         if (ocrPollTimer) clearInterval(ocrPollTimer);
         btnRunOCR.disabled = false;
         if (btnRunOCRFast) btnRunOCRFast.disabled = false;
+        if (btnRunOCRLinkOnly) btnRunOCRLinkOnly.disabled = false;
     }
 }
 
 if (btnRunOCR) {
-    btnRunOCR.addEventListener('click', () => runOCR(false));
+    btnRunOCR.addEventListener('click', () => runOCR('normal'));
 }
 
 if (btnRunOCRFast) {
-    btnRunOCRFast.addEventListener('click', () => runOCR(true));
+    btnRunOCRFast.addEventListener('click', () => runOCR('fast'));
+}
+
+if (btnRunOCRLinkOnly) {
+    btnRunOCRLinkOnly.addEventListener('click', () => runOCR('link_only'));
 }
 
 if (btnExportExcel) {
@@ -2427,7 +2476,7 @@ function showOCRDetail(item) {
     if (detailFileName) detailFileName.textContent = item.file_name || '-';
     if (detailHasRingi) detailHasRingi.textContent = item.has_ringi ? 'あり' : 'なし';
 
-    ocrPreviewModal.style.display = 'block';
+    ocrPreviewModal.style.display = 'flex';
 
     if (ocrPdfFrame) ocrPdfFrame.src = `/api/ocr/files/${encodeURIComponent(item.file_name)}`;
 }
