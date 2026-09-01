@@ -641,11 +641,13 @@ async def sync_sheet(
         
         result = service.sync_site_sheet(
             db_path=str(DB_PATH),
-            run_id="RECONCILE_MERGE", 
+            run_id="RECONCILE_MERGE",
             site_sheet_id=site_sheet_id,
             site_dept_codes=[],
             site_rows=more_rows,
-            merge_mode=True
+            merge_mode=True,
+            current_vendor_code=vendor_code,
+            base_month=base_month
         )
         
         logger.debug(f"sync_site_sheet result: {result}")

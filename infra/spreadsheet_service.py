@@ -1371,26 +1371,42 @@ class SpreadsheetService:
             existing_rows = all_values[1:] if len(all_values) > 1 else []
             
             # 必須カラム定義（順序固定）
+            # 「対象月」は請求一覧突合(New)側(spreadsheet_service_ext.py)が使う列。
+            # このシートは2つの機能が共用しているため、このメソッドは自分が
+            # 書いた行（対象月が空欄）だけを差し替え、突合(New)側の行（対象月に値がある）は
+            # 消さずに残す（マージ方式）。
             CORE_HEADERS = [
-                "ｽﾃｰﾀｽ", "ｺﾒﾝﾄ", "区分", 
-                "部門ｺｰﾄﾞ", "部門名", "取引先ｺｰﾄﾞ", "取引先名", 
-                "取引日付", "支払金額"
+                "ｽﾃｰﾀｽ", "ｺﾒﾝﾄ", "区分",
+                "部門ｺｰﾄﾞ", "部門名", "取引先ｺｰﾄﾞ", "取引先名",
+                "取引日付", "支払金額", "対象月"
             ]
-            
+
             # 既存列の位置を探す
             col_map = {name: idx for idx, name in enumerate(existing_header)}
-            
+
             # 既存データのマップ化（照合用）
             map_key_a = {}
             map_key_b = {}
-            
+
             # 新旧カラム名の両方に対応 (Old: site_status -> New: ｽﾃｰﾀｽ)
             idx_status = col_map.get("site_status", col_map.get("ｽﾃｰﾀｽ", -1))
             idx_comment = col_map.get("site_comment", col_map.get("ｺﾒﾝﾄ", -1))
             idx_dept = col_map.get("dept_code", col_map.get("部門ｺｰﾄﾞ", -1))
             idx_vendor = col_map.get("vendor_code", col_map.get("取引先ｺｰﾄﾞ", -1))
             idx_amount = col_map.get("pay_amount", col_map.get("支払金額", -1))
-            
+            idx_target_month = col_map.get("対象月", -1)
+
+            # 請求一覧突合(New)側が書いた行（対象月に値がある行）は保持し、
+            # このメソッド自身が書いた行（対象月が空欄）だけを差し替え対象とする
+            if idx_target_month >= 0:
+                kept_rows = [
+                    row for row in existing_rows
+                    if len(row) > idx_target_month and str(row[idx_target_month]).strip()
+                ]
+            else:
+                # 「対象月」列がまだない古い形式のシート → 判別不能なため従来通り全差し替え
+                kept_rows = []
+
             for i, row in enumerate(existing_rows):
                 if idx_dept >= 0 and idx_vendor >= 0 and len(row) > idx_vendor:
                     d_code = str(row[idx_dept]).strip()
@@ -1484,22 +1500,35 @@ class SpreadsheetService:
                     v_code,
                     db_row["vendor_name"],
                     db_row["transaction_date"],
-                    amt
+                    amt,
+                    ""  # 対象月: このメソッド自身が書く行は空欄のまま（自分の行の判別用）
                 ]
                 new_rows.append(new_row)
                 validations.append({"kind": kind, "options": options})
 
-            # 4. 書き込み ---
+            # 突合(New)側から保持した行のバリデーションも組み直す（区分ごとのプルダウン維持のため）
+            idx_kind = col_map.get("区分", -1)
+            kept_validations = [
+                {
+                    "kind": (str(row[idx_kind]).strip() if idx_kind >= 0 and len(row) > idx_kind else ""),
+                    "options": self._get_validation_options(str(row[idx_kind]).strip() if idx_kind >= 0 and len(row) > idx_kind else "")
+                }
+                for row in kept_rows
+            ]
+
+            # 4. 書き込み --- (突合(New)側の保持行 + 自分の新規行)
             final_header = CORE_HEADERS
-            final_data = [final_header] + new_rows
-            
+            final_rows = kept_rows + new_rows
+            final_validations = kept_validations + validations
+            final_data = [final_header] + final_rows
+
             sheet.clear()
             # 数式を有効にするため USER_ENTERED を指定 (現場用は不要なため削除)
             sheet.update(final_data, "A1", value_input_option='USER_ENTERED')
-            
+
             sheet_id = sheet.id
             self._apply_header_format(sh, sheet_id, len(final_header))
-            self._apply_mixed_validations(sh, sheet_id, validations)
+            self._apply_mixed_validations(sh, sheet_id, final_validations)
             
             # 条件付き書式 (2026/02/04 追加)
             # C列(Index 2): 区分
@@ -1628,6 +1657,7 @@ class SpreadsheetService:
             log.update({
                 "updated": True,
                 "rows_written": len(new_rows),
+                "rows_kept_from_reconcile": len(kept_rows),
                 "fields_preserved": preserved_count,
                 "fields_cleared": cleared_count,
                 "status": "success"

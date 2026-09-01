@@ -91,6 +91,12 @@ ringisyo_keywords:
   - "標準【H26.10～】０５－０１"
   - "[社長決裁]"
 
+# ボリューム上限（OCRスキップ判定）
+# フォルダ内の対象ファイル合計ページ数がこれを超える場合はOCRをスキップする
+# （賃貸借契約書など請求書以外の大容量添付ファイルによる処理時間増大・誤読を防ぐ）
+volume_limit:
+  max_total_pages: 8
+
 # AI OCR設定
 ai_ocr:
   # 使用するプロバイダー: gemini / openai / bedrock

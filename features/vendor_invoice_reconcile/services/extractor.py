@@ -48,10 +48,18 @@ class ExcelExtractor(BaseExtractor):
                 except ValueError:
                     continue # Skip non-numeric amounts (e.g. headers/footers mixed in)
 
+                # 0円・合計行はスキップ (PDFExtractorと同様)
+                if amount_val == 0:
+                    continue
+                raw_dept_str = str(raw_dept).strip()
+                skip_keywords = ["合計", "小計", "総計", "total", "subtotal"]
+                if any(k in raw_dept_str for k in skip_keywords):
+                    continue
+
                 record = InvoiceRecord(
                     row_index=index + config.excel_header_row + 1, # 1-based row index (approx)
                     source_file=Path(file_path).name,
-                    raw_dept_name=str(raw_dept).strip(),
+                    raw_dept_name=raw_dept_str,
                     raw_amount=amount_val
                 )
                 records.append(record)

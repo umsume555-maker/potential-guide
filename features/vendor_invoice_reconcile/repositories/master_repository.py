@@ -175,10 +175,24 @@ class MasterRepository:
         """
         全取引先マスタを取得
         Returns: {vendor_code: vendor_name}
+        masters_vendorに未登録の取引先は、output_summaryの取引先名で補完する
+        （毎月あるけど今月なしチェックで、マスタ未登録の取引先の名前が空欄になるのを防ぐ）
         """
         with get_db() as conn:
             cursor = conn.execute("SELECT vendor_code, vendor_name FROM masters_vendor")
-            return {row["vendor_code"]: row["vendor_name"] for row in cursor}
+            names = {row["vendor_code"]: row["vendor_name"] for row in cursor}
+
+            cursor = conn.execute(
+                "SELECT vendor_code, vendor_name FROM output_summary "
+                "WHERE vendor_name IS NOT NULL AND vendor_name != '' "
+                "GROUP BY vendor_code"
+            )
+            for row in cursor:
+                code = row["vendor_code"]
+                if not names.get(code):
+                    names[code] = row["vendor_name"]
+
+            return names
 
     def get_target_vendors(self) -> List[str]:
         """

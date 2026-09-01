@@ -2191,7 +2191,6 @@ const btnRunOCR = document.getElementById('btnRunOCR');
 const btnRunOCRFast = document.getElementById('btnRunOCRFast');
 const btnRunOCRLinkOnly = document.getElementById('btnRunOCRLinkOnly');
 const btnRefreshOCR = document.getElementById('btnRefreshOCR');
-const btnExportExcel = document.getElementById('btnExportExcel');
 const ocrListBody = document.getElementById('ocrListBody');
 const ocrStatusMsg = document.getElementById('ocrStatusMsg');
 
@@ -2395,12 +2394,6 @@ if (btnRunOCRLinkOnly) {
     btnRunOCRLinkOnly.addEventListener('click', () => runOCR('link_only'));
 }
 
-if (btnExportExcel) {
-    btnExportExcel.addEventListener('click', () => {
-        window.open('/api/ocr/export', '_blank');
-    });
-}
-
 
 // Helper for OCR Scope
 const ocrEscapeHtml = (str) => {
@@ -2437,6 +2430,9 @@ async function loadOCRResults() {
         data.forEach(item => {
             const tr = document.createElement('tr');
             const ringiLabel = item.has_ringi ? ' <span class="badge warn" style="font-size:0.7em">稟議</span>' : '';
+            const volumeSkipLabel = item.match_status === 'SKIP_VOLUME'
+                ? ' <span class="badge dash" style="font-size:0.7em">スキップ(容量超過)</span>'
+                : '';
             tr.innerHTML = `
                 <td style="font-size:0.85em">${ocrEscapeHtml(item.approval_no || '-')}</td>
                 <td>${ocrEscapeHtml(item.vendor_name || '-')}</td>
@@ -2444,7 +2440,7 @@ async function loadOCRResults() {
                 <td style="font-size:0.8em">
                     <a href="#" class="file-link" style="color:var(--accent); text-decoration:underline; cursor:pointer; word-break:break-all;">
                         ${ocrEscapeHtml(item.file_name || '-')}
-                    </a>${ringiLabel}
+                    </a>${ringiLabel}${volumeSkipLabel}
                 </td>
             `;
             tr.querySelector('.file-link').addEventListener('click', (e) => {

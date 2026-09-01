@@ -18,13 +18,23 @@ class SpreadsheetServiceExt:
     def authenticate(self) -> gspread.Client:
         return SpreadsheetService(str(self.credentials_path)).authenticate()
 
-    def sync_site_sheet(self, db_path: str, run_id: str, site_sheet_id: str, site_dept_codes: List[str], overrides: Dict[tuple, str] = None, site_rows: List[Dict] = None, merge_mode: bool = False) -> Dict[str, str]:
+    @staticmethod
+    def _force_text_code(value) -> str:
+        """部門コード・取引先コードの先頭アポストロフィを1つに統一する
+        （''1234 と '1234 のような表記揺れを防ぎ、数値化も防ぐ）"""
+        s = str(value).strip()
+        core = s.lstrip("'")
+        return f"'{core}" if core.isdigit() else s
+
+    def sync_site_sheet(self, db_path: str, run_id: str, site_sheet_id: str, site_dept_codes: List[str], overrides: Dict[tuple, str] = None, site_rows: List[Dict] = None, merge_mode: bool = False, current_vendor_code: str = None, base_month: str = None) -> Dict[str, str]:
         """
         現場用スプレッドシートを更新する
-        
+
         Args:
             overrides: (dept_code, vendor_code) -> "ズレ" などの強制ステータス辞書
             site_rows: DB検索の代わりに直接書き込むデータリスト (Sync from Reconcile PDF)
+            current_vendor_code: 今回突合を実行した取引先コード（merge_mode時、この取引先の古い「もれ」等を差し替えるため）
+            base_month: 今回の基準月（対象月列に記録し、月次更新時の一括削除に使う）
         """
         log = {"updated": False}
         if overrides is None:
@@ -122,9 +132,9 @@ class SpreadsheetServiceExt:
             # 必須カラム定義（順序固定・半角カナ統一）
             # チェック実行タブ(spreadsheet_service.py)と同じヘッダー名を使用
             CORE_HEADERS = [
-                "ｽﾃｰﾀｽ", "ｺﾒﾝﾄ", "区分", 
+                "ｽﾃｰﾀｽ", "ｺﾒﾝﾄ", "区分",
                 "部門ｺｰﾄﾞ", "部門名", "取引先ｺｰﾄﾞ", "取引先名",
-                "取引日付", "支払金額"
+                "取引日付", "支払金額", "対象月"
             ]
             
             # ヘッダー同期
@@ -230,10 +240,10 @@ class SpreadsheetServiceExt:
                 # 部門コード補正: 8桁ゼロ埋め & 文字列化
                 if d_code and d_code.isdigit():
                     d_code = f"{int(d_code):08d}"
-                d_code_str = f"'{d_code}" if d_code and d_code.isdigit() else d_code
+                d_code_str = self._force_text_code(d_code)
 
                 # 取引先コード文字列化
-                v_code_str = f"'{v_code}" if v_code and v_code.isdigit() else v_code
+                v_code_str = self._force_text_code(v_code)
 
                 # 行データの構築 (CORE_HEADERS順)
                 new_row = [
@@ -246,7 +256,8 @@ class SpreadsheetServiceExt:
                     v_name,
                     # db_row.get("is_monthly", ""), # Removed
                     db_row["transaction_date"],
-                    final_amt
+                    final_amt,
+                    base_month or ""
                 ]
                 new_rows.append(new_row)
                 validations.append({"kind": kind, "options": options})
@@ -255,140 +266,118 @@ class SpreadsheetServiceExt:
             final_header = CORE_HEADERS
             
             if merge_mode:
-                # === マージモード: 既存データを維持し、新規行を末尾に追記 ===
-                # 重複チェック: (dept_code, vendor_code, amount, vendor_name, transaction_date)
-                existing_keys = set()
+                # === マージモード: 今回対象の取引先・種別の古い行は差し替え、それ以外は維持 ===
+                # - 「毎月あるけど今月なし」は毎回全対象取引先分を再計算しているため、常に総入れ替え
+                # - 「もれ」「二重入力？」「取引日付ズレ？」「月ズレ？」は、今回突合した取引先(current_vendor_code)
+                #   の分のみ、今回の結果で総入れ替え（古い月の残骸が消えずに残るのを防ぐ）
                 idx_date = col_map.get("取引日付", -1)
                 idx_kind = col_map.get("区分", col_map.get("種別", -1))
-                
-                for row in existing_rows:
+                REPLACE_KINDS_FOR_VENDOR = {"もれ", "二重入力？", "取引日付ズレ？", "月ズレ？"}
+
+                def _row_kind(row):
+                    return str(row[idx_kind]).strip() if idx_kind >= 0 and len(row) > idx_kind else ""
+
+                def _row_vendor(row):
+                    return str(row[idx_vendor]).strip().replace("'", "") if idx_vendor >= 0 and len(row) > idx_vendor else ""
+
+                def _should_replace(row):
+                    kind = _row_kind(row)
+                    if kind == "毎月あるけど今月なし":
+                        return True
+                    if current_vendor_code and kind in REPLACE_KINDS_FOR_VENDOR:
+                        return _row_vendor(row) == str(current_vendor_code).strip()
+                    return False
+
+                kept_rows = [row for row in existing_rows if not _should_replace(row)]
+                replaced_count = len(existing_rows) - len(kept_rows)
+
+                # 既存行の部門コード・取引先コード表記を統一（''1234 のような揺れを '1234 に統一）
+                normalized_kept_rows = []
+                for row in kept_rows:
+                    row = list(row)
+                    if idx_dept >= 0 and len(row) > idx_dept:
+                        row[idx_dept] = self._force_text_code(row[idx_dept])
+                    if idx_vendor >= 0 and len(row) > idx_vendor:
+                        row[idx_vendor] = self._force_text_code(row[idx_vendor])
+                    normalized_kept_rows.append(row)
+                kept_rows = normalized_kept_rows
+
+                kept_validations = [
+                    {"kind": _row_kind(row), "options": self._get_validation_options(_row_kind(row))}
+                    for row in kept_rows
+                ]
+
+                # 重複チェック用キー (保持する既存行のみ対象。差し替え対象は除外済みなので自然に再追加される)
+                existing_keys = set()
+                for row in kept_rows:
                     if idx_dept >= 0 and idx_vendor >= 0 and idx_amount >= 0 and len(row) > max(idx_dept, idx_vendor, idx_amount):
-                        d = str(row[idx_dept]).strip()
-                        # Normalize d
-                        d_norm = d.replace("'", "")
-                        if d_norm.isdigit(): d_norm = f"{int(d_norm):08d}"
-                        
-                        v = str(row[idx_vendor]).strip()
-                        # Normalize v
-                        v_norm = v.replace("'", "")
+                        d = str(row[idx_dept]).strip().replace("'", "")
+                        d_norm = f"{int(d):08d}" if d.isdigit() else d
+
+                        v_norm = _row_vendor(row)
                         if v_norm.isdigit(): v_norm = str(int(v_norm))
-                        
+
                         a = str(row[idx_amount]).strip().replace(",", "")
                         try:
                             a = str(int(float(a)))
                         except:
                             pass
-                        
-                        # 取引先名も含める
-                        n = ""
-                        if idx_vendor_name >= 0 and len(row) > idx_vendor_name:
-                             n = str(row[idx_vendor_name]).strip()
-                             
-                        # 取引日付も含める
-                        dt = ""
-                        if idx_date >= 0 and len(row) > idx_date:
-                            dt = str(row[idx_date]).strip()
-                            
-                        # 種別/区分も含める (Kind)
-                        k = ""
-                        if idx_kind >= 0 and len(row) > idx_kind:
-                            k = str(row[idx_kind]).strip()
-                        
+
+                        n = str(row[idx_vendor_name]).strip() if idx_vendor_name >= 0 and len(row) > idx_vendor_name else ""
+                        dt = str(row[idx_date]).strip() if idx_date >= 0 and len(row) > idx_date else ""
+                        k = _row_kind(row)
+
                         key = (d_norm, v_norm, a, n, dt, k)
                         existing_keys.add(key)
-                
-                append_rows = []
-                skipped = 0
-                for new_row in new_rows:
-                    # new_row は CORE_HEADERS 順
-                    # 0:Status, 1:Comment, 2:Kind, 3:DeptCode, 4:DeptName, 5:VendorCode, 6:VendorName, 7:Date, 8:Amount
-                    d = str(new_row[3]).strip()
-                    # Normalize d
-                    d_norm = d.replace("'", "")
-                    if d_norm.isdigit(): d_norm = f"{int(d_norm):08d}"
 
-                    v = str(new_row[5]).strip()
-                    # Normalize v
-                    v_norm = v.replace("'", "")
-                    if v_norm.isdigit(): v_norm = str(int(v_norm))
+                append_rows = []
+                append_validations = []
+                skipped = 0
+                for i, new_row in enumerate(new_rows):
+                    # new_row は CORE_HEADERS 順
+                    # 0:Status, 1:Comment, 2:Kind, 3:DeptCode, 4:DeptName, 5:VendorCode, 6:VendorName, 7:Date, 8:Amount, 9:BaseMonth
+                    d = str(new_row[3]).strip().replace("'", "")
+                    d_norm = f"{int(d):08d}" if d.isdigit() else d
+
+                    v = str(new_row[5]).strip().replace("'", "")
+                    v_norm = str(int(v)) if v.isdigit() else v
 
                     n = str(new_row[6]).strip()
                     dt = str(new_row[7]).strip()
                     k = str(new_row[2]).strip()
-                    
-                    # Old index 9 -> New index 8
+
                     a = str(new_row[8]).strip().replace(",", "")
                     try:
                         a = str(int(float(a)))
                     except:
                         pass
-                    
+
                     key = (d_norm, v_norm, a, n, dt, k)
-                    
+
                     if key in existing_keys:
                         skipped += 1
                         continue
                     append_rows.append(new_row)
+                    append_validations.append(validations[i])
                     existing_keys.add(key)
-                
-                if append_rows:
-                    # ヘッダーがなければ先にヘッダーを書く
-                    if not existing_header:
-                        sheet.update([final_header] + append_rows)
-                        merge_start_row_idx = 1  # 0-indexed (header=0, data starts at 1)
-                    else:
-                        # 既存データの末尾に追記
-                        start_row = len(all_values) + 1
-                        needed_rows = start_row + len(append_rows)
-                        
-                        try:
-                            # 行数が足りない場合は拡張
-                            if sheet.row_count < needed_rows:
-                                print(f"[DEBUG] Resizing sheet from {sheet.row_count} to {needed_rows}")
-                                sheet.resize(rows=needed_rows)
-                        except Exception as e:
-                            print(f"[WARN] Failed to resize sheet: {e}")
 
-                        sheet.update(append_rows, f"A{start_row}")
-                        merge_start_row_idx = len(all_values)  # 0-indexed
-                    
-                    # 追記行にもDataValidation(プルダウン)を適用
-                    merge_validations = []
-                    for row_data in append_rows:
-                        kind = row_data[2]  # CORE_HEADERS[2] = 種別
-                        options = self._get_validation_options(kind)
-                        merge_validations.append({"kind": kind, "options": options})
-                    
-                    if merge_validations:
-                        requests = []
-                        for i, val in enumerate(merge_validations):
-                            row_idx = merge_start_row_idx + i
-                            options = val["options"]
-                            if options:
-                                condition = {
-                                    "type": "ONE_OF_LIST",
-                                    "values": [{"userEnteredValue": opt} for opt in options]
-                                }
-                                rule_def = {
-                                    "condition": condition,
-                                    "showCustomUi": True,
-                                    "strict": True
-                                }
-                                requests.append({"setDataValidation": {
-                                    "range": {
-                                        "sheetId": sheet.id,
-                                        "startRowIndex": row_idx, "endRowIndex": row_idx + 1,
-                                        "startColumnIndex": 0, "endColumnIndex": 1
-                                    },
-                                    "rule": rule_def
-                                }})
-                        if requests:
-                            sh.batch_update({"requests": requests})
-                
+                final_rows = kept_rows + append_rows
+                final_validations = kept_validations + append_validations
+                final_data = [final_header] + final_rows
+
+                sheet.clear()
+                sheet.update(final_data)
+
+                self._apply_header_format(sh, sheet.id, len(final_header))
+                self._apply_mixed_validations(sh, sheet.id, final_validations)
+                self._apply_conditional_formatting(sh, sheet.id, len(final_rows))
+
                 log.update({
                     "updated": True,
                     "rows_written": len(append_rows),
+                    "rows_replaced": replaced_count,
                     "rows_skipped_dup": skipped,
+                    "rows_total": len(final_rows),
                     "fields_preserved": preserved_count,
                     "fields_cleared": cleared_count
                 })
@@ -437,6 +426,96 @@ class SpreadsheetServiceExt:
             # I previously viewed `_ext.py` and it DID NOT have `rows_missing_added` logic.
             # So I probably don't need to disable it if I didn't add it.
             # But I need to revert `_fetch_site_data` filter.
+
+    def purge_old_reconcile_rows(self, site_sheet_id: str, base_month: str) -> Dict[str, str]:
+        """月次更新のタイミングで、現場用シートから「対象月」が base_month 以前の
+        請求一覧突合系の行（もれ・二重入力？・取引日付ズレ？・月ズレ？・毎月あるけど今月なし）を削除する。
+
+        「対象月」列がない古い形式のシートには何もしない（安全側に倒す）。
+        """
+        log = {"updated": False}
+        if not site_sheet_id:
+            log["status"] = "skipped"
+            log["reason"] = "Site sheet ID not configured"
+            return log
+
+        import re
+        if "google.com" in site_sheet_id or "/" in site_sheet_id:
+            match = re.search(r"/d/([a-zA-Z0-9-_]+)", site_sheet_id)
+            if match:
+                site_sheet_id = match.group(1)
+
+        try:
+            client = self.authenticate()
+            sh = call_with_retry(client.open_by_key, site_sheet_id, max_retries=3, delay=5.0)
+            sheet = sh.sheet1
+
+            all_values = sheet.get_all_values()
+            if not all_values:
+                log["status"] = "skipped"
+                log["reason"] = "Sheet is empty"
+                return log
+
+            header = all_values[0]
+            rows = all_values[1:]
+            col_map = {name: idx for idx, name in enumerate(header)}
+            idx_base_month = col_map.get("対象月", -1)
+
+            if idx_base_month < 0:
+                log["status"] = "skipped"
+                log["reason"] = "対象月 column not found (old sheet format)"
+                return log
+
+            idx_dept = col_map.get("部門ｺｰﾄﾞ", col_map.get("部門コード", -1))
+            idx_vendor = col_map.get("取引先ｺｰﾄﾞ", col_map.get("取引先コード", -1))
+
+            kept_rows = []
+            removed_count = 0
+            for row in rows:
+                row_base_month = str(row[idx_base_month]).strip() if len(row) > idx_base_month else ""
+                # 対象月が空欄の行（主チェック機能側が書いた「毎月あるのに今月ない」等）はそのまま維持
+                # 今回閉じる月(base_month)自体の行は消さず、それより過去の月だけを削除する
+                if row_base_month and row_base_month < base_month:
+                    removed_count += 1
+                    continue
+
+                # 部門コード・取引先コードの表記を統一（''1234 のような揺れを '1234 に統一）
+                row = list(row)
+                if idx_dept >= 0 and len(row) > idx_dept:
+                    row[idx_dept] = self._force_text_code(row[idx_dept])
+                if idx_vendor >= 0 and len(row) > idx_vendor:
+                    row[idx_vendor] = self._force_text_code(row[idx_vendor])
+                kept_rows.append(row)
+
+            if removed_count == 0:
+                log["status"] = "skipped"
+                log["reason"] = "No stale rows to remove"
+                return log
+
+            idx_kind = col_map.get("区分", col_map.get("種別", -1))
+            validations = []
+            for row in kept_rows:
+                kind = str(row[idx_kind]).strip() if idx_kind >= 0 and len(row) > idx_kind else ""
+                validations.append({"kind": kind, "options": self._get_validation_options(kind)})
+
+            final_data = [header] + kept_rows
+            sheet.clear()
+            sheet.update(final_data)
+
+            self._apply_header_format(sh, sheet.id, len(header))
+            self._apply_mixed_validations(sh, sheet.id, validations)
+            self._apply_conditional_formatting(sh, sheet.id, len(kept_rows))
+
+            log.update({
+                "updated": True,
+                "rows_removed": removed_count,
+                "rows_remaining": len(kept_rows)
+            })
+        except Exception as e:
+            log["status"] = "error"
+            log["error"] = str(e)
+
+        return log
 
     def _fetch_site_data(self, db_path, run_id, dept_codes):
         """DBから現場用データを取得・フィルタリング"""

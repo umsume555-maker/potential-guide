@@ -1,7 +1,7 @@
 ﻿# app/routers/ocr.py
 import logging
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, File, UploadFile, Form
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import List, Optional
 import sqlite3
@@ -15,7 +15,6 @@ logger = logging.getLogger(__name__)
 
 from infra.database import DB_PATH
 from domain.services.invoice_match_service import InvoiceMatchService
-from domain.services.excel_exporter import ExcelExporter
 
 router = APIRouter(
     prefix="/api/ocr",
@@ -30,6 +29,7 @@ class OCRResultItem(BaseModel):
     dept_name: Optional[str]
     status: Optional[str]
     has_ringi: Optional[int]
+    match_status: Optional[str] = None
 
 class OCRAnalysisResponse(BaseModel):
     message: str
@@ -249,6 +249,7 @@ async def analyze_invoices(
     background_tasks: BackgroundTasks,
     resume: bool = False,
     fast: bool = False,
+    link_only: bool = False,
     files: Optional[List[UploadFile]] = File(None)
 ):
     """OCR解析と突合を実行（差分解析対応・バックグラウンド処理）
@@ -256,6 +257,7 @@ async def analyze_invoices(
     Args:
         resume: Trueの場合、既存データを削除せず続きから再開
         fast: Trueの場合、Geminiによる傾き補正をスキップして高速化
+        link_only: Trueの場合、金額・請求書番号のOCR読取自体を省略し、リンク生成に必要な情報のみ記録する（最速）
         files: ZIPファイル（複数可）（ブラウザからアップロード、省略時はZIP_FILE_INの既存ファイルを使用）
     """
 
@@ -374,23 +376,25 @@ async def analyze_invoices(
     # 5. バックグラウンドでOCR実行
     import asyncio
 
-    def _run_ocr_thread(svc, rid, zip_path, is_fast, zip_info_list):
+    def _run_ocr_thread(svc, rid, zip_path, is_fast, is_link_only, zip_info_list):
         """async process_and_match をスレッド内で実行し、完了後にzip_logを更新"""
-        asyncio.run(svc.process_and_match(rid, zip_path, is_fast))
+        asyncio.run(svc.process_and_match(rid, zip_path, is_fast, is_link_only))
         _update_zip_log(zip_info_list)
 
     service = InvoiceMatchService(DB_PATH)
     t = threading.Thread(
         target=_run_ocr_thread,
-        args=(service, run_id, zip_out_path, fast, processed_zip_info),
+        args=(service, run_id, zip_out_path, fast, link_only, processed_zip_info),
         daemon=True,
         name="ocr-worker"
     )
     t.start()
 
     mode = "差分解析" if skip_count > 0 else "全件解析"
+    if link_only:
+        mode += "（リンクのみ）"
     msg = f"{mode}開始: 新規/変更={process_count}件, スキップ={skip_count}件"
-    logger.info(f"OCR thread started: run_id={run_id}, fast={fast}, {msg}")
+    logger.info(f"OCR thread started: run_id={run_id}, fast={fast}, link_only={link_only}, {msg}")
 
     return {
         "message": msg,
@@ -487,7 +491,7 @@ async def get_ocr_results():
     query = """
         SELECT
             r.approval_no, r.file_name,
-            r.vendor_name, r.dept_name, r.status, r.has_ringi
+            r.vendor_name, r.dept_name, r.status, r.has_ringi, r.match_status
         FROM invoice_ocr_results r
         WHERE r.run_id = ?
         ORDER BY r.approval_no, r.file_name
@@ -504,26 +508,10 @@ async def get_ocr_results():
                 "dept_name": row["dept_name"],
                 "status": row["status"],
                 "has_ringi": row["has_ringi"],
+                "match_status": row["match_status"],
             })
 
     return results
-
-@router.get("/export")
-async def export_excel():
-    """OCR結果をExcelでダウンロード"""
-    run_id = _get_latest_run_id()
-    if not run_id:
-        raise HTTPException(status_code=400, detail="No run data found")
-
-    exporter = ExcelExporter(DB_PATH)
-    output = exporter.export_ocr_results(run_id)
-    filename = f"ocr_results_{run_id}.xlsx"
-
-    return StreamingResponse(
-        output,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename={filename}"}
-    )
 
 @router.get("/files/{approval_no}/{filename}")
 async def get_invoice_file_by_approval(approval_no: str, filename: str):

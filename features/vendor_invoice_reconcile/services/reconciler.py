@@ -157,21 +157,44 @@ class Reconciler:
             match_row = None
             if (d_code, amt) in e2_pool and e2_pool[(d_code, amt)]:
                 match_row = e2_pool[(d_code, amt)].pop(0)
-            
+
+            # 分割払い対応: 単一金額で一致しない場合、同一部門コード、または
+            # このシノニムに設定された候補部門(第2候補等)まで含めた残りE2レコード
+            # （複数件、複数部門をまたぐ場合も含む）の合計が請求額と一致すれば一致とみなす
+            split_rows = None
+            if not match_row and amt > 0:
+                candidate_codes = {d_code}
+                for _rec in agg_data["records"]:
+                    for _cand in (_rec.candidate_dept_codes or []):
+                        candidate_codes.add(self._normalize_code(_cand))
+                dept_keys = [k for k in e2_pool.keys() if k[0] in candidate_codes and e2_pool[k]]
+                candidates = [(k, r) for k in dept_keys for r in e2_pool[k]]
+                if len(candidates) >= 2 and sum(k[1] for k, _ in candidates) == amt:
+                    split_rows = candidates
+
             status = "MISSING"
             tx_date = ""
             dept_name = ""
-            
+
             if match_row:
                 status = "OK"
                 dept_name = match_row["dept_name"]
                 tx_date = match_row["transaction_date"]
-                
+
                 # Check Date Diff (Matched Next Month?)
                 is_next = match_row in e2_rows_next
                 if is_next:
                     status = "DATE_DIFF" # Transaction Date Diff (Paid Next Month)
-            
+            elif split_rows:
+                status = "OK"
+                for k, r in split_rows:
+                    e2_pool[k].remove(r)
+                    processed_depts.add(k[0]) # 候補部門をまたいだ場合も処理済みにする
+                dept_name = split_rows[0][1]["dept_name"]
+                tx_date = split_rows[0][1]["transaction_date"]
+                if any(r in e2_rows_next for _, r in split_rows):
+                    status = "DATE_DIFF" # 分割払いの一部が翌月扱い
+
             if not dept_name and d_code in self.dept_master:
                 dept_name = self.dept_master[d_code]
             if not dept_name:
@@ -184,6 +207,9 @@ class Reconciler:
                  if c_base >= 2 and c_prev <= 1:
                      status = "DOUBLE_INPUT"
 
+            # MISSING (E2に一致なし) の場合、支払実績は0円・差額は請求金額そのまま
+            matched_amt = amt if (match_row or split_rows) else 0
+
             res = ReconcileResult(
                 base_month=base_month,
                 vendor_code=vendor_code,
@@ -191,8 +217,8 @@ class Reconciler:
                 dept_code=d_code,
                 dept_name=str(dept_name),
                 invoice_amount=amt,
-                payment_amount=amt,
-                diff_amount=0,
+                payment_amount=matched_amt,
+                diff_amount=amt - matched_amt,
                 status=status,
                 details=agg_data["records"],
                 transaction_date=tx_date

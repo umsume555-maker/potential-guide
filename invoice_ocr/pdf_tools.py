@@ -227,6 +227,22 @@ def normalize_pdf_rotation_via_gemini(pdf_path: Path, api_key: str, model: str =
         return None
 
 
+def get_pdf_page_count(pdf_path: Path) -> int:
+    """
+    PDFのページ数を取得（画像化せず、軽量にメタデータのみ読む）
+
+    Returns:
+        ページ数。読み取り失敗時は 1（安全側に倒し、スキップ判定で誤って
+        除外しないようにする）
+    """
+    try:
+        from pypdf import PdfReader
+        return len(PdfReader(str(pdf_path)).pages)
+    except Exception as e:
+        print(f"[WARN] PDFページ数取得失敗: {pdf_path.name} - {e}")
+        return 1
+
+
 def is_text_pdf(pdf_path: Path, min_chars: int = 50) -> bool:
     """
     テキスト層を持つPDFかどうかを判定

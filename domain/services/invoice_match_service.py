@@ -9,6 +9,7 @@ from invoice_ocr.ocr_engine import ocr_pdf, ocr_image_file
 from invoice_ocr.extractor import extract_all
 from invoice_ocr.scoring import calculate_score
 from invoice_ocr.ai_ocr import extract_billing_amount_with_gemini, get_gemini_api_key
+from invoice_ocr.pdf_tools import get_pdf_page_count
 
 class InvoiceMatchService:
     def __init__(self, db_path: str):
@@ -29,12 +30,14 @@ class InvoiceMatchService:
             pass
         return None
 
-    async def process_and_match(self, run_id: str, zip_out_path: Path, fast: bool = False) -> dict:
+    async def process_and_match(self, run_id: str, zip_out_path: Path, fast: bool = False, link_only: bool = False) -> dict:
         """
         ZIP展開後のフォルダをスキャンし、OCR実行・突合を行う
 
         Args:
             fast: Trueの場合、Geminiによる傾き補正をスキップして高速化
+            link_only: Trueの場合、金額・請求書番号のOCR読取自体を省略し、
+                       部門・取引先・ファイルパスからの「リンク」生成に必要な情報のみ保存する（最速）
         """
         self.logger.info(f"Starting OCR matching for RunID: {run_id}")
 
@@ -118,6 +121,85 @@ class InvoiceMatchService:
             else:
                 ocr_target = invoice_files[0]
 
+            # 全ファイル名を記録（請求書 + 稟議書、カンマ区切り）
+            # 同名ファイルが別フォルダに存在する場合の誤リンクを防ぐため
+            # 「承認番号/ファイル名」形式で保存して一意に特定できるようにする
+            all_files = invoice_files + ringi_files
+            file_names = ",".join(f"{folder_approval_no}/{f.name}" for f in all_files)
+
+            if link_only:
+                # 金額・請求書番号の読取（OCR/Gemini呼び出し）を省略し、
+                # 部門・取引先・ファイルパスからの「リンク」生成に必要な情報のみ保存する
+                results_to_save.append({
+                    "run_id": run_id,
+                    "approval_no": folder_approval_no,
+                    "file_name": file_names,
+                    "dept_code": dept_code,
+                    "dept_name": dept_name,
+                    "vendor_code": vendor_code,
+                    "vendor_name": vendor_name,
+                    "target_decision_no": None,
+                    "detected_amount": None,
+                    "detected_invoice_no": None,
+                    "detected_date": None,
+                    "has_reduced_tax": 0,
+                    "has_ringi": 1 if has_ringi else 0,
+                    "status": folder.status,
+                    "confidence": 0,
+                    "ocr_method": "link_only",
+                    "match_status": "LINK_ONLY",
+                    "amount_diff": None
+                })
+                processed_count += 1
+                if len(results_to_save) >= 10:
+                    self._save_results(results_to_save)
+                    results_to_save = []
+                    self.logger.info(f"Saved intermediate results: {processed_count} files processed")
+                continue
+
+            # --- ボリュームチェック ---
+            # フォルダ内の対象ファイル合計ページ数が上限を超える場合はOCRをスキップ
+            # （賃貸借契約書等の大容量添付ファイルによる処理時間増大・誤読を防ぐ）
+            max_total_pages = (
+                self.config.get("volume_limit", {}).get("max_total_pages", 8)
+                if self.config else 8
+            )
+            total_pages = sum(
+                get_pdf_page_count(f) if f.suffix.lower() == ".pdf" else 1
+                for f in all_files
+            )
+            if total_pages > max_total_pages:
+                self.logger.warning(
+                    f"ボリューム超過のためスキップ: {folder_approval_no} "
+                    f"(合計{total_pages}ページ > 上限{max_total_pages}ページ)"
+                )
+                results_to_save.append({
+                    "run_id": run_id,
+                    "approval_no": folder_approval_no,
+                    "file_name": file_names,
+                    "dept_code": dept_code,
+                    "dept_name": dept_name,
+                    "vendor_code": vendor_code,
+                    "vendor_name": vendor_name,
+                    "target_decision_no": None,
+                    "detected_amount": None,
+                    "detected_invoice_no": None,
+                    "detected_date": None,
+                    "has_reduced_tax": 0,
+                    "has_ringi": 1 if has_ringi else 0,
+                    "status": folder.status,
+                    "confidence": 0,
+                    "ocr_method": "skip_volume",
+                    "match_status": "SKIP_VOLUME",
+                    "amount_diff": None
+                })
+                processed_count += 1
+                if len(results_to_save) >= 10:
+                    self._save_results(results_to_save)
+                    results_to_save = []
+                    self.logger.info(f"Saved intermediate results: {processed_count} files processed")
+                continue
+
             # 請求書ファイルをOCR処理（金額検出用は最大ファイル）
             file_path = ocr_target
             ocr_result = self._perform_ocr(file_path, force_model=force_model)
@@ -187,13 +269,7 @@ class InvoiceMatchService:
             )
             
             detected_amount = extracted.amount
-            
-            # 全ファイル名を記録（請求書 + 稟議書、カンマ区切り）
-            # 同名ファイルが別フォルダに存在する場合の誤リンクを防ぐため
-            # 「承認番号/ファイル名」形式で保存して一意に特定できるようにする
-            all_files = invoice_files + ringi_files
-            file_names = ",".join(f"{folder_approval_no}/{f.name}" for f in all_files)
-            
+
             # --- 突合ロジック ---
             candidates = summary_map.get((dept_code, vendor_code), [])
             

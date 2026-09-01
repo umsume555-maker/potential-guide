@@ -10,7 +10,9 @@ build/
 # 請求書PDF等の実データ（機密情報）
 invoice_ocr/ZIP_FILE_OUT/
 invoice_ocr/output/
+invoice_ocr/PDF_ARCHIVE/
 masters/
+取り込みデータ/
 
 # 仮想環境
 venv/
@@ -27,6 +29,8 @@ data/app.db
 data/credentials.json
 credentials.json
 *.json.bak
+key/
+data/*.db.bak*
 
 # 出力ファイル（生成物）
 data/OUTPUT_*.xlsx
@@ -42,6 +46,7 @@ data/reconcile_*.xlsx
 
 # 設定ファイル（環境ごとに異なる）
 config/invoice_reconcile_settings.json
+config/server_base_url.txt
 
 # ログ
 *.log

@@ -466,6 +466,21 @@ async def upload_department_master(
             tmp_path.unlink()
 
 
+@router.get("/department-master")
+async def list_department_master(q: str = ""):
+    """部門マスタ一覧取得（部門コード・部門名で検索）"""
+    sql = "SELECT dept_code, dept_name FROM masters_department"
+    params = []
+    if q:
+        sql += " WHERE dept_code LIKE ? OR dept_name LIKE ?"
+        params = [f"%{q}%", f"%{q}%"]
+    sql += " ORDER BY dept_code"
+
+    with get_db() as conn:
+        cursor = conn.execute(sql, params)
+        return [dict(row) for row in cursor.fetchall()]
+
+
 @router.post("/account/upload")
 async def upload_account_rule(
     file: UploadFile = File(...)

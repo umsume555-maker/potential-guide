@@ -34,7 +34,8 @@ echo     アクセスURL: http://%LOCAL_IP%:8000
 echo     ※ 他のPCからは上記URLでアクセスしてください
 
 echo [5.5] server_url.txt を更新中...
-echo http://%LOCAL_IP%:8000> "%~dp0配布用\server_url.txt"
+if not exist "%~dp0配布用_new" mkdir "%~dp0配布用_new"
+echo http://%LOCAL_IP%:8000> "%~dp0配布用_new\server_url.txt"
 echo     ローカル配布用: http://%LOCAL_IP%:8000
 
 echo [5.6] アプリ内部のベースURL設定を更新中...

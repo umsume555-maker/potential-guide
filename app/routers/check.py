@@ -16,8 +16,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from domain.services.check_service import CheckService, CheckResult
 from domain.services.cumulative_service import CumulativeService
+from infra.database import get_db, resolve_credentials_path
+from infra.settings_repository import SettingsRepository
+from infra.spreadsheet_service_ext import SpreadsheetServiceExt
 
 router = APIRouter(prefix="/api/check", tags=["check"])
+_settings_repo = SettingsRepository()
 
 # 最後の実行結果を保持
 last_result: Optional[CheckResult] = None
@@ -162,10 +166,30 @@ async def update_monthly(data: MonthlyUpdateRequest):
     try:
         service = CumulativeService()
         count = service.update_monthly(data.run_id, data.base_month)
-        
+
+        message = f"月次更新が完了しました（追加: {count}件）"
+
+        # 現場案内用シートから、対象月が今回閉じる基準月以前の
+        # 請求一覧突合系の古い「もれ」等をまとめて削除する
+        try:
+            with get_db() as conn:
+                site_sheet_id = _settings_repo.get_setting(conn, "site_sheet_id")
+            if site_sheet_id:
+                with get_db() as conn:
+                    creds_setting = _settings_repo.get_setting(conn, "google_credentials_path")
+                creds_path = resolve_credentials_path(creds_setting)
+                if creds_path:
+                    ext_service = SpreadsheetServiceExt(credentials_path=str(creds_path))
+                    purge_log = ext_service.purge_old_reconcile_rows(site_sheet_id, data.base_month)
+                    if purge_log.get("updated"):
+                        message += f" / 現場シートの古い「もれ」等を{purge_log.get('rows_removed', 0)}件削除しました"
+        except Exception as e:
+            # シート側の後片付けが失敗しても月次更新自体は成功させる
+            message += f" / 現場シートの整理はスキップされました（{e}）"
+
         return {
             "status": "ok",
-            "message": f"月次更新が完了しました（追加: {count}件）",
+            "message": message,
             "count": count
         }
     except Exception as e:
